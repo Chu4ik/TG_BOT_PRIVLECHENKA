@@ -6,6 +6,9 @@ ID googlesheets - 1G8HU94KfbnoiKe9E3lfwSYuyAis19TpwJxl7aVa9T6I
 
 Coogle Key API - AIzaSyAQBt5-xfAoZZGNKqm761CZ5NnVbj1YiDk
 
+git remote set-url origin https://github.com/Chu4ik/TG_BOT_PRIVLECHENKA.git
+
+
 https://t.me/ZakazyPrivlechenkaBot
 
 @OchinskiyS
