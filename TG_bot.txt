@@ -1,10 +1,4 @@
-privlechenka@brilliant-scene-450007-s7.iam.gserviceaccount.com
-
 TOKEN - 8045202719:AAEJ_9W43zSto6hoeZNal1QusoArT-URuE8
-
-ID googlesheets - 1G8HU94KfbnoiKe9E3lfwSYuyAis19TpwJxl7aVa9T6I
-
-Coogle Key API - AIzaSyAQBt5-xfAoZZGNKqm761CZ5NnVbj1YiDk
 
 git remote set-url origin https://github.com/Chu4ik/TG_BOT_PRIVLECHENKA.git
 
