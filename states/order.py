@@ -3,7 +3,6 @@ from aiogram.fsm.state import State, StatesGroup
 class OrderFSM(StatesGroup):
     selecting_client = State()
     client_selected = State()
-    selecting_category = State()
     selecting_product = State()
     awaiting_quantity = State()
     editing_order = State()

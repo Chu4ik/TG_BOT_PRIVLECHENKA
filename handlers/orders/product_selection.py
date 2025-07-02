@@ -8,40 +8,27 @@ from db_operations.db import get_connection
 
 router = Router()
 
-@router.message(StateFilter(OrderFSM.selecting_product))
-async def show_products(message: Message, state: FSMContext, category_id: int):
+async def send_all_products(message: Message):
     conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT product_id, name, price
-                FROM products
-                WHERE category_id = %s
-                ORDER BY name
-                """,
-                (category_id,)
-            )
-            products = cur.fetchall()
-    finally:
-        conn.close()
+    cur = conn.cursor()
+    cur.execute("SELECT product_id, name FROM products ORDER BY name")
+    products = cur.fetchall()
+    cur.close()
+    conn.close()
 
     if not products:
-        await message.answer("🚫 В данной категории нет товаров.")
+        await message.answer("❌ Товаров пока нет.")
         return
 
-    # формируем сопоставление и клавиатуру
-    product_map = {}
-    buttons = []
+    buttons = [KeyboardButton(text=name) for _, name in products]
+    rows = [[btn] for btn in buttons]
+    keyboard = ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
-    for product_id, name, price in products:
-        product_map[name] = (product_id, price)
-        buttons.append(KeyboardButton(text=name))
+    await message.answer("📦 Выберите товар:", reply_markup=keyboard)
 
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True).add(*buttons)
-
-    await state.update_data(product_map=product_map)
-    await message.answer("🛒 Выберите товар:", reply_markup=keyboard)
+@router.message(StateFilter(OrderFSM.selecting_product))
+async def show_all_products(message: Message, state: FSMContext):
+    await send_all_products(message)
 
 @router.message(StateFilter(OrderFSM.selecting_product))
 async def product_chosen(message: Message, state: FSMContext):
@@ -49,25 +36,27 @@ async def product_chosen(message: Message, state: FSMContext):
     product_map = state_data.get("product_map", {})
 
     product_name = message.text
-    product = product_map.get(product_name)
+    product_id = product_map.get(product_name)
 
-    if not product:
-        await message.answer("⚠️ Пожалуйста, выберите товар из списка.")
+    if not product_id:
+        await message.answer("⚠️ Пожалуйста, выбери товар из списка.")
         return
 
-    product_id, price = product
-
-    await state.update_data(selected_product={
+    await state.update_data({
         "product_id": product_id,
-        "product_name": product_name,
-        "unit_price": price
+        "product_name": product_name
     })
 
-    await message.answer(f"📦 Товар: <b>{product_name}</b>\n💰 Цена за единицу: {price}\n\nВведите количество:", parse_mode="HTML")
+    await message.answer(
+        f"📦 Товар: <b>{product_name}</b>\n"
+        f"🔢 Введите количество для добавления:",
+        parse_mode="HTML"
+    )
     await state.set_state(OrderFSM.awaiting_quantity)
 
 @router.message(StateFilter(OrderFSM.awaiting_quantity))
 async def quantity_entered(message: Message, state: FSMContext):
+    print(f"[FSM] Текущее состояние: {await state.get_state()}") 
     try:
         qty = int(message.text)
         if qty <= 0:
@@ -78,24 +67,33 @@ async def quantity_entered(message: Message, state: FSMContext):
 
     state_data = await state.get_data()
     selected = state_data.get("selected_product")
-    selected["quantity"] = qty
 
+    if not selected:
+        await message.answer("⚠️ Не удалось получить данные о товаре.")
+        return
+
+    selected["quantity"] = qty
     user_id = message.from_user.id
+
+    # Инициализация корзины, если её нет
+    if "cart" not in order_cache[user_id]:
+        order_cache[user_id]["cart"] = []
+
     cart = order_cache[user_id]["cart"]
 
-    # ⛔ Проверка: уже есть такой товар в корзине?
+    # ⛔ Проверка на дубликат
     existing = next((item for item in cart if item["product_id"] == selected["product_id"]), None)
 
     if existing:
-        existing["quantity"] += qty  # просто увеличиваем
+        existing["quantity"] += qty
         await message.answer(
-            f"🔁 Товар <b>{selected['product_name']}</b> уже был в корзине.\n"
+            f"🔁 Товар <b>{selected['product_name']}</b> уже был в заказе.\n"
             f"📦 Количество обновлено до <b>{existing['quantity']}</b>",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardRemove()
         )
     else:
-        add_to_cart(user_id, selected)
+        cart.append(selected)
         await message.answer(
             f"✅ Добавлено в заказ: <b>{selected['product_name']}</b> × {qty}",
             parse_mode="HTML",
@@ -103,5 +101,10 @@ async def quantity_entered(message: Message, state: FSMContext):
         )
 
     await state.set_state(OrderFSM.editing_order)
-    from handlers.orders.order_editor import show_cart_menu
-    await show_cart_menu(message, state)
+
+    # Переход в редактор
+    try:
+        from handlers.orders.order_editor import show_cart_menu
+        await show_cart_menu(message, state)
+    except Exception:
+        await message.answer("⚠️ Не удалось загрузить редактор заказа.")
