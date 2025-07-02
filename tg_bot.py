@@ -4,8 +4,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import TELEGRAM_TOKEN
 
-from handlers.main_menu import router as menu_router
-from handlers.orders.client_selection import router as client_router
+# Импортируем все роутеры из общего списка
+from handlers import order_routers # <-- Изменено здесь
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,11 +16,9 @@ logging.basicConfig(
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Подключение роутеров
+# Подключение всех роутеров из списка order_routers
 dp.include_routers(
-    menu_router,
-    client_router,
-    # добавляй остальные по мере написания
+    *order_routers # <-- Изменено здесь: распаковываем список роутеров
 )
 
 # Основная точка запуска

@@ -18,3 +18,9 @@ def update_delivery_date(user_id, new_date):
     if user_id not in order_cache:
         init_order(user_id)
     order_cache[user_id]["delivery_date"] = new_date
+
+order_cache = {}
+
+def store_address(user_id: int, address_id: int):
+    order_cache[user_id]["address_id"] = address_id
+

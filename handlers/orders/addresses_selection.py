@@ -6,6 +6,7 @@ from states.order import OrderFSM
 from utils.order_cache import order_cache
 from db_operations.db import get_connection
 from handlers.orders.product_selection import send_all_products
+from utils.order_cache import store_address
 
 router = Router()
 
@@ -13,6 +14,7 @@ router = Router()
 async def choose_address(message: Message, state: FSMContext):
     state_data = await state.get_data()
     client_name = state_data.get("client_name")
+    user_id = message.from_user.id # Определяем user_id здесь для согласованности
 
     # Получаем client_id
     conn = get_connection()
@@ -22,15 +24,17 @@ async def choose_address(message: Message, state: FSMContext):
 
     if not result:
         await message.answer("❌ Клиент не найден в базе данных.")
+        cur.close()
+        conn.close()
         return
 
     client_id = result[0]
-    order_cache[message.from_user.id]["client_id"] = client_id
+    order_cache[user_id]["client_id"] = client_id # Убедитесь, что client_id сохранен
 
     # Получаем адреса
     cur.execute("""
-        SELECT address_id, address_text 
-        FROM addresses 
+        SELECT address_id, address_text
+        FROM addresses
         WHERE client_id = %s
     """, (client_id,))
     rows = cur.fetchall()
@@ -44,14 +48,14 @@ async def choose_address(message: Message, state: FSMContext):
     # Если адрес один — авто-выбор
     if len(rows) == 1:
         address_id, address_text = rows[0]
-        order_cache[message.from_user.id]["address_id"] = address_id
+        store_address(user_id, address_id) # Используем store_address
         await message.answer(f"✅ Автоматически выбран адрес: {address_text}", reply_markup=ReplyKeyboardRemove())
 
         await state.set_state(OrderFSM.selecting_product)
-        await send_all_products(message)
+        await send_all_products(message, state) # <-- Передаем state здесь
         return
 
-    # Иначе — показать список
+    # Иначе — показать список (этот блок выполняется, если len(rows) > 1)
     buttons = [KeyboardButton(text=row[1]) for row in rows]
     rows_markup = [[button] for button in buttons]  # по одной кнопке в строке
 
@@ -84,9 +88,9 @@ async def address_chosen(message: Message, state: FSMContext):
         return
 
     user_id = message.from_user.id
-    order_cache[user_id]["address_id"] = address_id
+    store_address(user_id, address_id)
     await state.update_data(address_id=address_id)
 
     await message.answer(f"✅ Адрес выбран: {selected_text}", reply_markup=ReplyKeyboardRemove())
     await state.set_state(OrderFSM.selecting_product)
-    await send_all_products(message)
+    await send_all_products(message, state)

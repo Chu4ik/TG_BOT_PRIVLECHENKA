@@ -8,7 +8,7 @@ from db_operations.db import get_connection
 
 router = Router()
 
-async def send_all_products(message: Message):
+async def send_all_products(message: Message, state: FSMContext): # Добавьте state как аргумент
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT product_id, name FROM products ORDER BY name")
@@ -24,13 +24,17 @@ async def send_all_products(message: Message):
     rows = [[btn] for btn in buttons]
     keyboard = ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
+    # Сохраните карту продуктов в контексте FSM
+    product_map = {name: product_id for product_id, name in products}
+    await state.update_data(product_map=product_map) # <--- Добавьте эту строку
+
     await message.answer("📦 Выберите товар:", reply_markup=keyboard)
 
 @router.message(StateFilter(OrderFSM.selecting_product))
 async def show_all_products(message: Message, state: FSMContext):
-    await send_all_products(message)
+    await send_all_products(message, state) # Передайте state здесь
 
-@router.message(StateFilter(OrderFSM.selecting_product))
+@router.message(StateFilter(OrderFSM.selecting_product), F.text) # Убедитесь, что он обрабатывает только текстовые сообщения
 async def product_chosen(message: Message, state: FSMContext):
     state_data = await state.get_data()
     product_map = state_data.get("product_map", {})
@@ -42,10 +46,10 @@ async def product_chosen(message: Message, state: FSMContext):
         await message.answer("⚠️ Пожалуйста, выбери товар из списка.")
         return
 
-    await state.update_data({
-        "product_id": product_id,
-        "product_name": product_name
-    })
+    # Вам также необходимо сохранить данные о выбранном продукте для последующего использования
+    # при вводе количества.
+    await state.update_data(selected_product={"product_id": product_id, "product_name": product_name})
+
 
     await message.answer(
         f"📦 Товар: <b>{product_name}</b>\n"
