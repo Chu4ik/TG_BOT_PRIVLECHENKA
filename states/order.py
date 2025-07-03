@@ -10,5 +10,6 @@ class OrderFSM(StatesGroup):
     confirming_order = State()
     editing_product_line = State()
     selecting_address = State()
+    choosing_next_action = State()
     
 

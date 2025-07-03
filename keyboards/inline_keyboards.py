@@ -29,3 +29,11 @@ def delivery_date_keyboard(dates):
     for d in dates:
         keyboard.insert(InlineKeyboardButton(text=d.strftime("%d.%m (%a)"), callback_data=f"date:{d.isoformat()}"))
     return keyboard
+
+def build_cart_keyboard(cart_len: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="✏ Изменить строку", callback_data="edit_line")],
+        [InlineKeyboardButton(text="📅 Изменить дату доставки", callback_data="edit_delivery_date")],
+        [InlineKeyboardButton(text="✅ Подтвердить заказ", callback_data="confirm_order")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
