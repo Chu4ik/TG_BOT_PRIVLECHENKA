@@ -1,127 +1,115 @@
-# handlers/orders/product_selection.py
 from aiogram import Router, F
 from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 from states.order import OrderFSM
-from utils.order_cache import order_cache, add_to_cart
-from db_operations.db import get_connection
-from decimal import Decimal # Импортируем Decimal
-from handlers.orders.order_helpers import _send_cart_summary
+from utils.order_cache import order_cache 
+from db_operations.db import get_connection, get_dict_cursor # Убедитесь, что get_dict_cursor импортирован
+from decimal import Decimal
 
-# Импортируем _send_cart_summary из нового файла
-from handlers.orders.order_helpers import _send_cart_summary
-# Возможно, вам также потребуется show_cart_menu из order_editor.py для некоторых переходов.
-# Если да, то ИМПОРТИРУЙТЕ ЕГО ВНУТРИ ФУНКЦИИ, где он нужен, чтобы не создавать новый цикл.
-# from handlers.orders.order_editor import show_cart_menu # НЕ ИМПОРТИРУЙТЕ ЗДЕСЬ НАПРЯМУЮ!
+from handlers.orders.order_helpers import _get_cart_summary_text 
 
 router = Router()
 
 async def send_all_products(message: Message, state: FSMContext):
     conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT product_id, name, price FROM products ORDER BY name") # Добавил price
+    cur = get_dict_cursor(conn) # ИЗМЕНЕНО: используем get_dict_cursor
+    cur.execute("SELECT product_id, name, price FROM products ORDER BY name") # Здесь 'name' и 'price' уже корректны
     products = cur.fetchall()
     cur.close()
     conn.close()
 
     if not products:
-        await message.answer("❌ Товаров пока нет.")
+        await message.answer("❌ Товаров пока нет. Пожалуйста, попробуйте позже.")
         return
 
-    buttons = [KeyboardButton(text=name) for _, name, _ in products]
-    rows = [[btn] for btn in buttons]
-    keyboard = ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+    product_buttons = []
+    for product in products:
+        # Здесь product['name'] и product['price'] будут работать, так как cur возвращает dict-подобные объекты
+        product_buttons.append([KeyboardButton(text=f"{product['name']} ({product['price']:.2f}₴)")])
 
-    # Сохраните карту продуктов в контексте FSM
-    product_map = {name: {"product_id": product_id, "price": price} for product_id, name, price in products}
-    await state.update_data(product_map=product_map)
-
-    await message.answer("📦 Выберите товар:", reply_markup=keyboard)
+    keyboard = ReplyKeyboardMarkup(keyboard=product_buttons, resize_keyboard=True)
+    await message.answer("Выберите товар:", reply_markup=keyboard)
+    await state.set_state(OrderFSM.selecting_product)
 
 
 @router.message(StateFilter(OrderFSM.selecting_product))
-async def product_chosen(message: Message, state: FSMContext):
-    state_data = await state.get_data()
-    product_map = state_data.get("product_map")
-    selected_product_name = message.text.strip()
+async def process_product_selection(message: Message, state: FSMContext):
+    conn = get_connection()
+    cur = get_dict_cursor(conn) # ИЗМЕНЕНО: используем get_dict_cursor
+    # Здесь message.text.split('(')[0].strip() используется для получения имени, это нормально
+    cur.execute("SELECT product_id, name, price FROM products WHERE name = %s", (message.text.split('(')[0].strip(),))
+    selected_product = cur.fetchone()
+    cur.close()
+    conn.close()
 
-    if selected_product_name not in product_map:
-        await message.answer("❌ Неизвестный товар. Пожалуйста, выберите из списка.")
-        return
-
-    selected_product_info = product_map[selected_product_name]
-    # Сохраняем полную информацию о выбранном товаре, включая цену
-    await state.update_data(selected_product={
-        "product_id": selected_product_info["product_id"],
-        "product_name": selected_product_name,
-        "price": selected_product_info["price"] # Сохраняем цену здесь
-    })
-
-    await state.set_state(OrderFSM.awaiting_quantity)
-    await message.answer(
-        f"📦 Товар: <b>{selected_product_name}</b>\n"
-        f"🔢 Введите количество для добавления:",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-
-@router.message(StateFilter(OrderFSM.awaiting_quantity))
-async def quantity_entered(message: Message, state: FSMContext):
-    qty_text = message.text.strip()
-
-    if not qty_text.isdigit():
-        await message.answer("⚠️ Пожалуйста, введите целое положительное число.")
-        return
-
-    qty = int(qty_text)
-    if qty <= 0:
-        await message.answer("⚠️ Количество должно быть положительным числом.")
-        return
-
-    state_data = await state.get_data()
-    selected = state_data.get("selected_product")
-
-    if not selected:
-        await message.answer("⚠️ Не удалось получить данные о товаре.")
-        return
-
-    selected["quantity"] = qty # Добавляем количество к выбранному товару
-    user_id = message.from_user.id
-
-    # Add to cart handles checking for duplicates and updating quantity
-    # and ensuring 'price' is Decimal.
-    cart = order_cache.setdefault(user_id, {}).setdefault("cart", [])
-
-    existing = next((item for item in cart if item["product_id"] == selected["product_id"]), None)
-
-    if existing:
-        existing["quantity"] += qty
-        await message.answer(
-            f"🔁 Товар <b>{selected['product_name']}</b> уже был в заказе.\n"
-            f"📦 Количество обновлено до <b>{existing['quantity']}</b>",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
-        )
+    if selected_product:
+        await state.update_data(selected_product=selected_product)
+        await message.answer("Введите количество:", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(OrderFSM.entering_quantity)
     else:
-        cart.append(selected) # 'selected' уже содержит 'price'
+        await message.answer("Неизвестный товар. Пожалуйста, выберите из списка.")
+
+
+@router.message(StateFilter(OrderFSM.entering_quantity))
+async def process_quantity_input(message: Message, state: FSMContext):
+    try:
+        quantity = int(message.text)
+        if quantity <= 0:
+            raise ValueError("Количество должно быть положительным.")
+
+        data = await state.get_data()
+        selected_product = data.get("selected_product")
+        cart = data.get("cart", []) # Получаем текущую корзину из FSM-состояния
+
+        if not selected_product:
+            await message.answer("Ошибка: товар не выбран. Начните сначала.", reply_markup=ReplyKeyboardRemove())
+            await state.clear() # Очищаем состояние
+            return
+
+        # Проверяем, есть ли уже такой товар в корзине
+        item_found_and_updated = False
+        for item in cart:
+            if item["product_id"] == selected_product["product_id"]:
+                item["quantity"] += quantity # Увеличиваем количество
+                item_found_and_updated = True
+                break
+        
+        if not item_found_and_updated:
+            # Если товара нет, добавляем новую позицию
+            new_item = {
+                "product_id": selected_product["product_id"],
+                "product_name": selected_product["name"],
+                "quantity": quantity,
+                "price": selected_product["price"]
+            }
+            cart.append(new_item)
+        
+        # ОБЯЗАТЕЛЬНО ОБНОВЛЯЕМ FSM-СОСТОЯНИЕ с новой корзиной после любых изменений
+        await state.update_data(cart=cart) 
+
+        # Отправляем подтверждение добавления товара
         await message.answer(
-            f"✅ Добавлено в заказ: <b>{selected['product_name']}</b> × {qty}",
+            f"✅ Добавлено в заказ: <b>{selected_product['name']}</b> × {quantity}",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardRemove()
         )
+            
+        # После добавления товара предлагаем выбрать следующее действие
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="➕ Добавить ещё товар")],
+                [KeyboardButton(text="✅ Завершить заказ")]
+            ],
+            resize_keyboard=True
+        )
+        await message.answer("Что дальше?", reply_markup=keyboard)
+        await state.set_state(OrderFSM.choosing_next_action)
 
-    # После добавления товара предлагаем выбрать следующее действие
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ Добавить ещё товар")],
-            [KeyboardButton(text="✅ Завершить заказ")]
-        ],
-        resize_keyboard=True
-    )
-    await message.answer("Что дальше?", reply_markup=keyboard)
-    await state.set_state(OrderFSM.choosing_next_action)
+    except ValueError:
+        await message.answer("❌ Неверное количество. Введите целое положительное число.")
+    except Exception as e:
+        await message.answer(f"Произошла ошибка: {e}. Пожалуйста, попробуйте снова.")
 
 
 @router.message(StateFilter(OrderFSM.choosing_next_action))
@@ -130,17 +118,11 @@ async def handle_next_action(message: Message, state: FSMContext):
         await state.set_state(OrderFSM.selecting_product)
         await send_all_products(message, state)
     elif message.text == "✅ Завершить заказ":
-        # Если нужно показать меню редактирования, импортируем show_cart_menu здесь
-        from handlers.orders.order_editor import show_cart_menu # <-- Ленивый импорт
-        await show_cart_menu(message, state) # Передаем state
-        # Состояние будет изменено внутри show_cart_menu на editing_order
+        # ЛЕНИВЫЙ ИМПОРТ: Импортируем show_cart_menu здесь
+        from handlers.orders.order_editor import show_cart_menu 
+        await show_cart_menu(message, state)
     else:
         await message.answer("Неизвестное действие. Пожалуйста, выберите из предложенных вариантов.")
-        # Повторно показываем сводку и варианты, если выбор не распознан
-        await _send_cart_summary(message, message.from_user.id)
-        buttons = [
-            [KeyboardButton(text="➕ Добавить ещё товар")],
-            [KeyboardButton(text="✅ Завершить заказ")]
-        ]
-        keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-        await message.answer("Что дальше?", reply_markup=keyboard)
+        # ЛЕНИВЫЙ ИМПОРТ: Импортируем show_cart_menu здесь
+        from handlers.orders.order_editor import show_cart_menu 
+        await show_cart_menu(message, state)

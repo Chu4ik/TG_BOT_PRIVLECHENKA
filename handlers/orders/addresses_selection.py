@@ -1,96 +1,35 @@
+# handlers/orders/addresses_selection.py
+
+import logging
 from aiogram import Router, F
-from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 from states.order import OrderFSM
-from utils.order_cache import order_cache
-from db_operations.db import get_connection
-# from handlers.orders.product_selection import send_all_products # <--- УДАЛИТЕ ЭТУ СТРОКУ
-from utils.order_cache import store_address
+from db_operations.db import get_connection, get_dict_cursor # Убедитесь, что get_dict_cursor импортирован
+
+# Ленивый импорт для product_selection, чтобы избежать циклических зависимостей
+from handlers.orders.product_selection import send_all_products
 
 router = Router()
+logger = logging.getLogger(__name__)
 
-@router.message(StateFilter(OrderFSM.client_selected))
-async def choose_address(message: Message, state: FSMContext):
-    state_data = await state.get_data()
-    client_name = state_data.get("client_name")
-    user_id = message.from_user.id
+def build_address_keyboard(addresses: list) -> InlineKeyboardMarkup:
+    """Строит клавиатуру с адресами для выбора."""
+    buttons = []
+    for addr in addresses:
+        # ИЗМЕНЕНО: addr['full_address'] -> addr['address_text'], addr['id'] -> addr['address_id']
+        buttons.append([InlineKeyboardButton(text=addr['address_text'], callback_data=f"address:{addr['address_id']}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT client_id FROM clients WHERE name = %s", (client_name,))
-    result = cur.fetchone()
+@router.callback_query(StateFilter(OrderFSM.selecting_address), F.data.startswith("address:"))
+async def process_address_selection(callback: CallbackQuery, state: FSMContext):
+    address_id = int(callback.data.split(":")[1])
+    
+    await state.update_data(address_id=address_id) 
 
-    if not result:
-        await message.answer("❌ Клиент не найден в базе данных.")
-        cur.close()
-        conn.close()
-        return
+    await callback.message.edit_text("Адрес доставки выбран. Начните добавлять товары в корзину.")
+    await callback.answer("Адрес выбран.", show_alert=True)
 
-    client_id = result[0]
-    order_cache[user_id]["client_id"] = client_id
-
-    cur.execute("""
-        SELECT address_id, address_text
-        FROM addresses
-        WHERE client_id = %s
-    """, (client_id,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    if not rows:
-        await message.answer("У этого клиента пока нет адресов. Пожалуйста, добавьте адрес вручную или выберите другого клиента.", reply_markup=ReplyKeyboardRemove())
-        # Можно предложить ввести адрес вручную или вернуться к выбору клиента
-        await state.set_state(OrderFSM.client_selected) # или другое подходящее состояние
-        return
-
-    if len(rows) == 1:
-        address_id, address_text = rows[0]
-        store_address(message.from_user.id, address_id)
-        await message.answer(f"✅ Автоматически выбран адрес: {address_text}", reply_markup=ReplyKeyboardRemove())
-
-        # Ленивый импорт здесь
-        from handlers.orders.product_selection import send_all_products
-        await state.set_state(OrderFSM.selecting_product)
-        await send_all_products(message, state)
-        return
-
-    buttons = [KeyboardButton(text=row[1]) for row in rows]
-    rows_markup = [[button] for button in buttons]
-
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=rows_markup,
-        resize_keyboard=True
-    )
-
-    await state.update_data(address_map={row[1]: row[0] for row in rows})
-    await message.answer("🏠 Выберите адрес доставки:", reply_markup=keyboard)
-    await state.set_state(OrderFSM.selecting_address)
-
-    print(f"[FSM] Текущее состояние: {await state.get_state()}")
-
-
-@router.message(StateFilter(OrderFSM.selecting_address))
-async def address_chosen(message: Message, state: FSMContext):
-    print(f"[FSM] Вошли в address_chosen")
-    selected_text = message.text.strip()
-    state_data = await state.get_data()
-    address_map = state_data.get("address_map", {})
-    print(f"[FSM] message.text = {selected_text}")
-    print(f"[FSM] address_map.keys() = {list(address_map.keys())}")
-    print(f"[FSM] FSM состояние: {await state.get_state()}")
-
-    address_id = address_map.get(selected_text)
-
-    if not address_id:
-        await message.answer("❌ Адрес не распознан. Пожалуйста, выберите из списка.")
-        return
-
-    store_address(message.from_user.id, address_id)
-    await message.answer(f"✅ Адрес установлен: {selected_text}", reply_markup=ReplyKeyboardRemove())
-
-    # Ленивый импорт здесь
     from handlers.orders.product_selection import send_all_products
-    await state.set_state(OrderFSM.selecting_product)
-    await send_all_products(message, state)
+    await send_all_products(callback.message, state)
