@@ -1,20 +1,25 @@
 # handlers/orders/order_helpers.py
-import re # Удалите эту строку, если 're' больше нигде не используется в этом файле
+import re
 from datetime import date
 from decimal import Decimal
 
 # Функция escape_markdown_v2 УДАЛЕНА ИЗ ЭТОГО ФАЙЛА!
 
-# ИЗМЕНЕНА: Теперь принимает cart_items и delivery_date как аргументы.
+# ИЗМЕНЕНА: Теперь принимает cart_items, delivery_date, client_name, address_text как аргументы.
 # Возвращает ЧИСТЫЙ текст без MarkdownV2 форматирования или экранирования.
-async def _get_cart_summary_text(cart_items: list, delivery_date: date | None) -> str:
+async def _get_cart_summary_text(cart_items: list, delivery_date: date | None, client_name: str | None = None, address_text: str | None = None) -> str:
     """Возвращает текущую сводку корзины в виде строки (без MarkdownV2 форматирования)."""
     summary_lines = []
 
-    if not cart_items and not delivery_date:
+    if not cart_items and not delivery_date and not client_name and not address_text:
         return "--- ТОВАРЫ В ЗАКАЗЕ ---\nКорзина пока пуста.\n------------------------"
         
     summary_lines.append("--- СВОДКА ЗАКАЗА ---")
+
+    if client_name:
+        summary_lines.append(f"Клиент: {client_name}")
+    if address_text:
+        summary_lines.append(f"Адрес: {address_text}")
 
     if delivery_date:
         summary_lines.append(f"Дата доставки: {delivery_date.strftime('%d.%m.%Y')}")
@@ -42,8 +47,5 @@ async def _get_cart_summary_text(cart_items: list, delivery_date: date | None) -
 
     summary_lines.append("------------------------")
     summary_lines.append(f"ИТОГО: {total_quantity_all_items} шт. на сумму {grand_total:.2f}₴")
-    summary_lines.append("------------------------")
 
-    final_summary_text = "\n".join(summary_lines)
-    
-    return final_summary_text
+    return "\n".join(summary_lines)
