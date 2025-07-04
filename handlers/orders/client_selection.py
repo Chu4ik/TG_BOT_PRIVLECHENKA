@@ -8,10 +8,10 @@ from aiogram.filters import StateFilter
 from states.order import OrderFSM
 from db_operations.db import get_connection, get_dict_cursor 
 
-from utils.order_cache import order_cache, calculate_default_delivery_date
+from utils.order_cache import order_cache, calculate_default_delivery_date # ИМПОРТИРУЕМ calculate_default_delivery_date
 from handlers.orders.addresses_selection import build_address_keyboard 
 from handlers.orders.product_selection import send_all_products 
-from handlers.orders.order_editor import escape_markdown_v2 # ДОБАВЛЕН ИМПОРТ
+from handlers.orders.order_editor import escape_markdown_v2 
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ async def start_order_process(message: Message, state: FSMContext):
     current_cart = state_data.get("cart")
     current_delivery_date = state_data.get("delivery_date")
 
+    # Если данных о заказе нет в кэше FSM, проверяем order_cache
     if not current_client_id and user_id in order_cache:
         cached_data = order_cache[user_id]
         await state.update_data(
@@ -38,6 +39,15 @@ async def start_order_process(message: Message, state: FSMContext):
             delivery_date=cached_data.get("delivery_date")
         )
         logger.info(f"Loaded cached order for user {user_id}: {await state.get_data()}")
+    
+    # Устанавливаем дату доставки по умолчанию, если она еще не установлена (ни из кэша, ни в новом заказе)
+    # Это важно, чтобы не перезаписывать дату, если пользователь уже ее выбрал или она загружена из кэша
+    state_data_after_cache_load = await state.get_data() # Получаем обновленные данные после загрузки из кэша
+    if not state_data_after_cache_load.get("delivery_date"):
+        default_date = calculate_default_delivery_date()
+        await state.update_data(delivery_date=default_date)
+        logger.info(f"Set default delivery date for user {user_id}: {default_date}")
+
 
     await message.answer("Пожалуйста, введите имя или название клиента для поиска:")
     await state.set_state(OrderFSM.entering_client_name)
@@ -57,15 +67,8 @@ async def process_client_name_input(message: Message, state: FSMContext):
         if len(clients) == 1:
             client = clients[0]
             await state.update_data(client_id=client['client_id'], client_name=client['name'])
-            await message.answer(f"✅ Выбран клиент: *{escape_markdown_v2(client['name'])}*", parse_mode="MarkdownV2") # ДОБАВЛЕНО СООБЩЕНИЕ
-            # Переходим к выбору адреса, вызывая show_addresses_for_client
-            # Это предполагает, что show_addresses_for_client находится в addresses_selection.py
-            # или должна быть импортирована. Если show_addresses_for_client нет,
-            # то здесь нужно будет реализовать логику показа адресов или вызвать build_address_keyboard
+            await message.answer(f"✅ Выбран клиент: *{escape_markdown_v2(client['name'])}*", parse_mode="MarkdownV2") 
             
-            # ВНИМАНИЕ: Предполагается, что show_addresses_for_client вызывается здесь
-            # Если такой функции нет, то это место, где должна быть логика получения адресов
-            # и вызова build_address_keyboard, а затем установка состояния selecting_address.
             conn = get_connection()
             cur = get_dict_cursor(conn) 
             cur.execute("SELECT address_id, address_text FROM addresses WHERE client_id = %s", (client['client_id'],))
@@ -78,13 +81,8 @@ async def process_client_name_input(message: Message, state: FSMContext):
                 await state.set_state(OrderFSM.selecting_address)
             else:
                 await message.answer(f"Для клиента *{escape_markdown_v2(client['name'])}* не найдено адресов. Пожалуйста, добавьте адрес вручную или выберите другого клиента.", parse_mode="MarkdownV2")
-                # Здесь можно вернуться в главное меню или предложить добавить новый адрес
-                # from handlers.main_menu import show_main_menu # Для возврата в главное меню
-                # await show_main_menu(message, state) # Если show_main_menu не вызывает циклический импорт
-                await state.clear() # Или просто очистить состояние
+                await state.clear()
                 await message.answer("Вы можете начать новый заказ.")
-
-
         else:
             buttons = []
             for client in clients:
@@ -109,10 +107,9 @@ async def select_client_from_list(callback: CallbackQuery, state: FSMContext):
 
     if client:
         await state.update_data(client_id=client['client_id'], client_name=client['name'])
-        await callback.answer(f"Клиент выбран: {client['name']}", show_alert=True) # Оповещение
-        await callback.message.edit_text(f"✅ Выбран клиент: *{escape_markdown_v2(client['name'])}*", parse_mode="MarkdownV2", reply_markup=None) # ДОБАВЛЕНО СООБЩЕНИЕ И УДАЛЕНИЕ КНОПОК
+        await callback.answer(f"Клиент выбран: {client['name']}", show_alert=True) 
+        await callback.message.edit_text(f"✅ Выбран клиент: *{escape_markdown_v2(client['name'])}*", parse_mode="MarkdownV2", reply_markup=None) 
         
-        # Получаем адреса для выбранного клиента
         conn = get_connection()
         cur = get_dict_cursor(conn) 
         cur.execute("SELECT address_id, address_text FROM addresses WHERE client_id = %s", (client_id,))
@@ -125,11 +122,8 @@ async def select_client_from_list(callback: CallbackQuery, state: FSMContext):
             await state.set_state(OrderFSM.selecting_address)
         else:
             await callback.message.answer(f"Для клиента *{escape_markdown_v2(client['name'])}* не найдено адресов. Пожалуйста, добавьте адрес вручную или выберите другого клиента.", parse_mode="MarkdownV2")
-            # Можно вернуться в главное меню
-            # from handlers.main_menu import show_main_menu
-            # await show_main_menu(callback.message, state)
-            await state.clear() # Или просто очистить состояние
+            await state.clear()
             await callback.message.answer("Вы можете начать новый заказ.")
     else:
         await callback.answer("Ошибка при выборе клиента. Попробуйте снова.", show_alert=True)
-    await callback.answer() # Закрываем уведомление о нажатии кнопки
+    await callback.answer()
