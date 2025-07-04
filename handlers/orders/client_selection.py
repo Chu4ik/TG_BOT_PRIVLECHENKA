@@ -11,6 +11,7 @@ from db_operations.db import get_connection, get_dict_cursor
 from utils.order_cache import order_cache, calculate_default_delivery_date
 from handlers.orders.addresses_selection import build_address_keyboard 
 from handlers.orders.product_selection import send_all_products 
+from handlers.orders.order_editor import escape_markdown_v2 # ДОБАВЛЕН ИМПОРТ
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -33,66 +34,41 @@ async def start_order_process(message: Message, state: FSMContext):
         await state.update_data(
             client_id=cached_data.get("client_id"),
             address_id=cached_data.get("address_id"),
-            cart=cached_data.get("cart", []),
-            delivery_date=cached_data.get("delivery_date"),
-            last_cart_message_id=cached_data.get("last_cart_message_id"),
-            last_cart_chat_id=cached_data.get("last_cart_chat_id")
+            cart=cached_data.get("cart"),
+            delivery_date=cached_data.get("delivery_date")
         )
-        state_data = await state.get_data() 
-        current_client_id = state_data.get("client_id")
-        current_address_id = state_data.get("address_id")
-        current_cart = state_data.get("cart")
-        current_delivery_date = state_data.get("delivery_date")
-        logger.info(f"FSM-состояние инициализировано из order_cache для пользователя {user_id}")
+        logger.info(f"Loaded cached order for user {user_id}: {await state.get_data()}")
 
-    if current_delivery_date is None:
-        default_date = calculate_default_delivery_date()
-        await state.update_data(delivery_date=default_date)
-        logger.info(f"Дефолтная дата доставки установлена для пользователя {user_id}: {default_date}")
-
-    if current_client_id:
-        conn = get_connection()
-        cur = get_dict_cursor(conn) 
-        # ИЗМЕНЕНО: id -> address_id, full_address -> address_text
-        cur.execute("SELECT address_id, address_text FROM addresses WHERE client_id = %s", (current_client_id,))
-        addresses = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        if addresses:
-            if current_address_id and any(addr['address_id'] == current_address_id for addr in addresses): # ИЗМЕНЕНО: id -> address_id
-                await message.answer("Клиент и адрес выбраны. Готовы к оформлению заказа.")
-                await send_all_products(message, state)
-            else:
-                await message.answer("Выберите адрес доставки:", reply_markup=build_address_keyboard(addresses))
-                await state.set_state(OrderFSM.selecting_address)
-        else:
-            await message.answer("У этого клиента нет зарегистрированных адресов. Пожалуйста, добавьте адрес или выберите другого клиента.")
-            await state.set_state(OrderFSM.entering_client_name)
-    else:
-        await message.answer("Введите имя или название клиента:")
-        await state.set_state(OrderFSM.entering_client_name)
+    await message.answer("Пожалуйста, введите имя или название клиента для поиска:")
+    await state.set_state(OrderFSM.entering_client_name)
 
 
 @router.message(StateFilter(OrderFSM.entering_client_name))
-async def process_client_name(message: Message, state: FSMContext):
-    client_name = message.text
+async def process_client_name_input(message: Message, state: FSMContext):
+    client_name_query = message.text.strip()
     conn = get_connection()
-    cur = get_dict_cursor(conn) 
-    cur.execute("SELECT client_id, name FROM clients WHERE name LIKE %s", (f"%{client_name}%",))
+    cur = get_dict_cursor(conn)
+    cur.execute("SELECT client_id, name FROM clients WHERE name ILIKE %s", (f"%{client_name_query}%",))
     clients = cur.fetchall()
     cur.close()
     conn.close()
 
     if clients:
         if len(clients) == 1:
-            selected_client = clients[0] 
-            await state.update_data(client_id=selected_client['client_id'])
+            client = clients[0]
+            await state.update_data(client_id=client['client_id'], client_name=client['name'])
+            await message.answer(f"✅ Выбран клиент: *{escape_markdown_v2(client['name'])}*", parse_mode="MarkdownV2") # ДОБАВЛЕНО СООБЩЕНИЕ
+            # Переходим к выбору адреса, вызывая show_addresses_for_client
+            # Это предполагает, что show_addresses_for_client находится в addresses_selection.py
+            # или должна быть импортирована. Если show_addresses_for_client нет,
+            # то здесь нужно будет реализовать логику показа адресов или вызвать build_address_keyboard
             
+            # ВНИМАНИЕ: Предполагается, что show_addresses_for_client вызывается здесь
+            # Если такой функции нет, то это место, где должна быть логика получения адресов
+            # и вызова build_address_keyboard, а затем установка состояния selecting_address.
             conn = get_connection()
             cur = get_dict_cursor(conn) 
-            # ИЗМЕНЕНО: id -> address_id, full_address -> address_text
-            cur.execute("SELECT address_id, address_text FROM addresses WHERE client_id = %s", (selected_client['client_id'],))
+            cur.execute("SELECT address_id, address_text FROM addresses WHERE client_id = %s", (client['client_id'],))
             addresses = cur.fetchall()
             cur.close()
             conn.close()
@@ -101,10 +77,18 @@ async def process_client_name(message: Message, state: FSMContext):
                 await message.answer("Выберите адрес доставки:", reply_markup=build_address_keyboard(addresses))
                 await state.set_state(OrderFSM.selecting_address)
             else:
-                await message.answer("У этого клиента нет зарегистрированных адресов. Пожалуйста, добавьте адрес или выберите другого клиента.")
-                await state.set_state(OrderFSM.entering_client_name)
+                await message.answer(f"Для клиента *{escape_markdown_v2(client['name'])}* не найдено адресов. Пожалуйста, добавьте адрес вручную или выберите другого клиента.", parse_mode="MarkdownV2")
+                # Здесь можно вернуться в главное меню или предложить добавить новый адрес
+                # from handlers.main_menu import show_main_menu # Для возврата в главное меню
+                # await show_main_menu(message, state) # Если show_main_menu не вызывает циклический импорт
+                await state.clear() # Или просто очистить состояние
+                await message.answer("Вы можете начать новый заказ.")
+
+
         else:
-            buttons = [[InlineKeyboardButton(text=c['name'], callback_data=f"client:{c['client_id']}")] for c in clients]
+            buttons = []
+            for client in clients:
+                buttons.append([InlineKeyboardButton(text=client['name'], callback_data=f"client:{client['client_id']}")])
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
             await message.answer("Найдено несколько клиентов. Выберите одного:", reply_markup=keyboard)
             await state.set_state(OrderFSM.selecting_multiple_clients)
@@ -115,22 +99,37 @@ async def process_client_name(message: Message, state: FSMContext):
 @router.callback_query(StateFilter(OrderFSM.selecting_multiple_clients), F.data.startswith("client:"))
 async def select_client_from_list(callback: CallbackQuery, state: FSMContext):
     client_id = int(callback.data.split(":")[1])
-    await state.update_data(client_id=client_id)
-
+    
     conn = get_connection()
     cur = get_dict_cursor(conn) 
-    # ИЗМЕНЕНО: id -> address_id, full_address -> address_text
-    cur.execute("SELECT address_id, address_text FROM addresses WHERE client_id = %s", (client_id,))
-    addresses = cur.fetchall()
+    cur.execute("SELECT client_id, name FROM clients WHERE client_id = %s", (client_id,))
+    client = cur.fetchone()
     cur.close()
     conn.close()
 
-    await callback.answer(f"Клиент выбран: {callback.message.text}", show_alert=True)
-    await callback.message.delete()
+    if client:
+        await state.update_data(client_id=client['client_id'], client_name=client['name'])
+        await callback.answer(f"Клиент выбран: {client['name']}", show_alert=True) # Оповещение
+        await callback.message.edit_text(f"✅ Выбран клиент: *{escape_markdown_v2(client['name'])}*", parse_mode="MarkdownV2", reply_markup=None) # ДОБАВЛЕНО СООБЩЕНИЕ И УДАЛЕНИЕ КНОПОК
+        
+        # Получаем адреса для выбранного клиента
+        conn = get_connection()
+        cur = get_dict_cursor(conn) 
+        cur.execute("SELECT address_id, address_text FROM addresses WHERE client_id = %s", (client_id,))
+        addresses = cur.fetchall()
+        cur.close()
+        conn.close()
 
-    if addresses:
-        await callback.message.answer("Выберите адрес доставки:", reply_markup=build_address_keyboard(addresses))
-        await state.set_state(OrderFSM.selecting_address)
+        if addresses:
+            await callback.message.answer("Выберите адрес доставки:", reply_markup=build_address_keyboard(addresses))
+            await state.set_state(OrderFSM.selecting_address)
+        else:
+            await callback.message.answer(f"Для клиента *{escape_markdown_v2(client['name'])}* не найдено адресов. Пожалуйста, добавьте адрес вручную или выберите другого клиента.", parse_mode="MarkdownV2")
+            # Можно вернуться в главное меню
+            # from handlers.main_menu import show_main_menu
+            # await show_main_menu(callback.message, state)
+            await state.clear() # Или просто очистить состояние
+            await callback.message.answer("Вы можете начать новый заказ.")
     else:
-        await callback.message.answer("У этого клиента нет зарегистрированных адресов. Пожалуйста, добавьте адрес или выберите другого клиента.")
-        await state.set_state(OrderFSM.entering_client_name)
+        await callback.answer("Ошибка при выборе клиента. Попробуйте снова.", show_alert=True)
+    await callback.answer() # Закрываем уведомление о нажатии кнопки
