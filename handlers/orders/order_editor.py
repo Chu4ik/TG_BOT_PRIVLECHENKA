@@ -389,3 +389,23 @@ async def process_new_quantity_input(message: Message, state: FSMContext):
 async def back_to_edit_item_menu(callback: CallbackQuery, state: FSMContext):
     await show_edit_item_menu(callback, state) # Возвращаемся в меню "Изменить строку"
     await callback.answer()
+
+# НОВЫЙ ХЭНДЛЕР: Обработка нажатия на кнопку "Добавить товар" из корзины
+@router.callback_query(F.data == "add_product")
+async def handle_add_product_from_cart(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    logger.info(f"User {user_id}: Entering handle_add_product_from_cart handler for 'add_product' callback.")
+    
+    # Пытаемся удалить или изменить предыдущее сообщение, чтобы убрать клавиатуру
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not edit message reply markup in handle_add_product_from_cart: {e}")
+        pass # Игнорируем, если сообщение не удалось отредактировать
+    
+    # ЛЕНИВЫЙ ИМПОРТ: Импортируем send_all_products здесь
+    from handlers.orders.product_selection import send_all_products
+    
+    await state.set_state(OrderFSM.selecting_product) # Переходим в состояние выбора продукта
+    await send_all_products(callback.message, state) # Отображаем список продуктов
+    await callback.answer() # Важно ответить на CallbackQuery
