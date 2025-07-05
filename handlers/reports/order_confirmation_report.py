@@ -2,10 +2,9 @@ import logging
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command # Используем для команды, если она прямая
-# Предполагается, что OrderFSM используется для состояний
+from aiogram.filters import Command 
 from states.order import OrderFSM 
-from db_operations.db import get_unconfirmed_orders, confirm_order_in_db, cancel_order_in_db, confirm_all_orders_in_db, cancel_all_orders_in_db # Импорт новых функций БД
+from db_operations.db import get_unconfirmed_orders, confirm_order_in_db, cancel_order_in_db, confirm_all_orders_in_db, cancel_all_orders_in_db 
 from datetime import date
 import re
 from keyboards.inline_keyboards import create_confirm_report_keyboard
@@ -15,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 def escape_markdown_v2(text: str) -> str:
     """Escapes special characters for MarkdownV2."""
-    # Убедитесь, что здесь есть точка '.'
     special_chars = r'_*[]()~`>#+-=|{}.!' 
     return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
@@ -26,52 +24,42 @@ def build_order_list_keyboard(orders: list) -> InlineKeyboardMarkup:
     """
     buttons = []
     
-    # Добавляем кнопки для просмотра отдельных заказов
     for order_id, order_date, client_name, total_amount in orders:
-        # Экранируем спецсимволы MarkdownV2 для текста кнопки
         escaped_client_name = client_name.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')
         buttons.append([
             InlineKeyboardButton(text=f"Заказ №{order_id} ({escaped_client_name}) - {total_amount:.2f}₴", 
                                  callback_data=f"view_order_{order_id}")
         ])
     
-    # Добавляем кнопки массовых действий, только если есть заказы
     if orders: 
         buttons.append([InlineKeyboardButton(text="✅ Подтвердить все заказы", callback_data="confirm_all_orders")])
         buttons.append([InlineKeyboardButton(text="❌ Отменить все заказы", callback_data="cancel_all_orders")])
     
-    # Кнопка "Назад" (может быть изменена в зависимости от структуры меню)
-    # buttons.append([InlineKeyboardButton(text="↩️ Назад к отчётам", callback_data="back_to_reports_menu")])
-
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.message(F.text == "/show_unconfirmed_orders")
 @router.callback_query(F.data == "show_unconfirmed_orders")
-async def show_unconfirmed_orders_report(callback_or_message, state: FSMContext):
-    # Явно инициализируем message_object значением None
-    # и указываем, что она может быть Message или None
+async def show_unconfirmed_orders_report(callback_or_message, state: FSMContext, db_pool): # <--- ДОБАВЛЕНО: db_pool
     message_object: Message | None = None 
 
     if isinstance(callback_or_message, CallbackQuery):
         await callback_or_message.answer() 
         message_object = callback_or_message.message
-    else: # Если это не CallbackQuery, значит это Message
+    else: 
         message_object = callback_or_message
 
-    # Важная проверка: если message_object все равно None (что крайне редко, но возможно)
-    # то не пытаемся отправить сообщение.
     if message_object is None:
         logger.error("Не удалось получить объект сообщения из 'callback_or_message'.")
-        # Попытайтесь отправить запасное сообщение, если возможно
         if isinstance(callback_or_message, CallbackQuery) and callback_or_message.message:
             await callback_or_message.message.answer("Произошла ошибка при отображении отчета. Пожалуйста, попробуйте еще раз.")
         elif isinstance(callback_or_message, Message):
             await callback_or_message.answer("Произошла ошибка при отображении отчета. Пожалуйста, попробуйте еще раз.")
-        return # Выходим из функции, чтобы избежать UnboundLocalError
+        return 
 
     logger.info("Показ отчета о неподтвержденных заказов.")
     
-    unconfirmed_orders = await get_unconfirmed_orders()
+    # ИСПРАВЛЕНИЕ: Передаем db_pool в get_unconfirmed_orders
+    unconfirmed_orders = await get_unconfirmed_orders(db_pool) 
 
     if not unconfirmed_orders:
         report_text = escape_markdown_v2("Нет неподтвержденных заказов.") 
@@ -105,52 +93,55 @@ async def show_unconfirmed_orders_report(callback_or_message, state: FSMContext)
 
     keyboard = create_confirm_report_keyboard(order_ids)
     
-    # Строка 106:
     await message_object.answer(report_text, reply_markup=keyboard, parse_mode="MarkdownV2")
 
 
 @router.callback_query(F.data == "confirm_all_orders")
-async def handle_confirm_all_orders(callback: CallbackQuery, state: FSMContext):
+async def handle_confirm_all_orders(callback: CallbackQuery, state: FSMContext, db_pool): # <--- ДОБАВЛЕНО: db_pool
     """
     Обрабатывает нажатие на кнопку "Подтвердить все заказы".
     """
-    orders_to_confirm = await get_unconfirmed_orders()
-    order_ids = [order[0] for order in orders_to_confirm] # Извлекаем только order_id
+    # ИСПРАВЛЕНИЕ: Передаем db_pool в get_unconfirmed_orders
+    orders_to_confirm = await get_unconfirmed_orders(db_pool) 
+    order_ids = [order[0] for order in orders_to_confirm] 
 
     if not order_ids:
         await callback.answer("Нет заказов для подтверждения.", show_alert=True)
         return
 
-    success = await confirm_all_orders_in_db(order_ids)
+    # ИСПРАВЛЕНИЕ: Передаем db_pool в confirm_all_orders_in_db
+    success = await confirm_all_orders_in_db(db_pool, order_ids) 
     if success:
         await callback.message.edit_text("✅ Все неподтвержденные заказы успешно подтверждены и сформированы накладные!")
     else:
         await callback.message.edit_text("❌ Произошла ошибка при подтверждении всех заказов.")
     await callback.answer()
-    # Обновляем отчет после действия
-    await show_unconfirmed_orders_report(callback, state)
+    # ИСПРАВЛЕНИЕ: Передаем db_pool в show_unconfirmed_orders_report
+    await show_unconfirmed_orders_report(callback, state, db_pool) 
 
 
 @router.callback_query(F.data == "cancel_all_orders")
-async def handle_cancel_all_orders(callback: CallbackQuery, state: FSMContext):
+async def handle_cancel_all_orders(callback: CallbackQuery, state: FSMContext, db_pool): # <--- ДОБАВЛЕНО: db_pool
     """
     Обрабатывает нажатие на кнопку "Отменить все заказы".
     """
-    orders_to_cancel = await get_unconfirmed_orders()
-    order_ids = [order[0] for order in orders_to_cancel] # Извлекаем только order_id
+    # ИСПРАВЛЕНИЕ: Передаем db_pool в get_unconfirmed_orders
+    orders_to_cancel = await get_unconfirmed_orders(db_pool) 
+    order_ids = [order[0] for order in orders_to_cancel] 
 
     if not order_ids:
         await callback.answer("Нет заказов для отмены.", show_alert=True)
         return
 
-    success = await cancel_all_orders_in_db(order_ids)
+    # ИСПРАВЛЕНИЕ: Передаем db_pool в cancel_all_orders_in_db
+    success = await cancel_all_orders_in_db(db_pool, order_ids) 
     if success:
         await callback.message.edit_text("🗑️ Все неподтвержденные заказы успешно отменены и удалены.")
     else:
         await callback.message.edit_text("❌ Произошла ошибка при отмене всех заказов.")
     await callback.answer()
-    # Обновляем отчет после действия
-    await show_unconfirmed_orders_report(callback, state)
+    # ИСПРАВЛЕНИЕ: Передаем db_pool в show_unconfirmed_orders_report
+    await show_unconfirmed_orders_report(callback, state, db_pool)
 
 @router.callback_query(F.data.startswith("view_order_"))
 async def view_individual_order(callback: CallbackQuery, state: FSMContext):
@@ -158,8 +149,4 @@ async def view_individual_order(callback: CallbackQuery, state: FSMContext):
     Обработчик для просмотра деталей отдельного заказа (функционал будет разработан позже).
     """
     order_id = int(callback.data.split("_")[2])
-    # Здесь будет логика для получения и отображения детальной информации о заказе
-    # И предоставление кнопок для подтверждения/отмены конкретного заказа
     await callback.answer(f"Просмотр заказа №{order_id} (функционал будет разработан позже)", show_alert=True)
-    # Можно установить новое состояние для этого:
-    # await state.set_state(OrderFSM.viewing_specific_order)

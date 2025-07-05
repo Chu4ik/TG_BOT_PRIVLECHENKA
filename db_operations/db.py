@@ -1,52 +1,42 @@
-import psycopg2
-import psycopg2.extras
-from config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
-from datetime import date, timedelta
 import logging
 from collections import namedtuple
 import asyncpg
+from datetime import date, timedelta
+from config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 
 logger = logging.getLogger(__name__)
 
-def get_connection():
-    """Устанавливает и возвращает соединение с базой данных PostgreSQL."""
+# Объявляем переменную для пула соединений, инициализируем её None
+# Эту строку db_pool = None можно удалить, так как пул теперь передается
+# или, если вы оставили её для справки, просто знайте, что она не используется
+# для текущей архитектуры передачи пула.
+
+async def init_db_pool():
+    """Инициализирует пул соединений asyncpg. Вызывается при старте бота."""
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
+        # Используем локальную переменную 'pool'
+        pool = await asyncpg.create_pool(
             user=DB_USER,
             password=DB_PASSWORD,
-            port=DB_PORT
+            database=DB_NAME,
+            host=DB_HOST,
+            port=DB_PORT,
+            min_size=5,
+            max_size=10,
+            timeout=60
         )
-        return conn
+        logger.info("Пул соединений asyncpg успешно инициализирован.")
+        return pool # Возвращаем локальный 'pool'
     except Exception as e:
-        print(f"Ошибка подключения к базе данных: {e}")
-        raise # Важно повторно вызвать исключение для обработки в вызывающем коде
+        logger.critical(f"Ошибка при инициализации пула соединений asyncpg: {e}", exc_info=True)
+        raise # Перевызываем исключение, чтобы остановить запуск бота, если нет подключения к БД
 
-def get_dict_cursor(conn):
-    """Возвращает курсор, который извлекает строки как словари."""
-    return conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+async def close_db_pool(pool): # Теперь 'pool' - это аргумент
+    """Закрывает пул соединений asyncpg. Вызывается при остановке бота."""
+    if pool:
+        await pool.close()
+        logger.info("Пул соединений asyncpg успешно закрыт.")
 
-def get_employee_id(telegram_id: int):
-    """
-    Получает employee_id из таблицы employees по telegram_id пользователя.
-    """
-    conn = None
-    cur = None
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT employee_id FROM employees WHERE id_telegram = %s", (telegram_id,))
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        return result[0] if result else None
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при получении employee_id для telegram_id {telegram_id}: {e}")
-        return None
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
 
 UnconfirmedOrder = namedtuple(
     "UnconfirmedOrder", 
@@ -60,25 +50,43 @@ UnconfirmedOrder = namedtuple(
     ]
 )
 
-async def get_unconfirmed_orders():
+async def get_employee_id(pool, telegram_id: int): # Добавили 'pool' как аргумент
+    """
+    Получает employee_id из таблицы employees по telegram_id пользователя (используя asyncpg).
+    """
     conn = None
     try:
-        conn = await asyncpg.connect(
-            user=DB_USER,        
-            password=DB_PASSWORD, 
-            database=DB_NAME,     
-            host=DB_HOST,         
-            port=DB_PORT         
-        )
+        # Получаем соединение из ПЕРЕДАННОГО пула
+        conn = await pool.acquire() # Используем 'pool'
+        
+        # asyncpg использует $1, $2 для параметров вместо %s
+        result = await conn.fetchrow("SELECT employee_id FROM employees WHERE id_telegram = $1", telegram_id)
+        
+        return result['employee_id'] if result else None
+    except asyncpg.exceptions.PostgresError as e:
+        logger.error(f"Ошибка asyncpg при получении employee_id для telegram_id {telegram_id}: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при получении employee_id для telegram_id {telegram_id}: {e}", exc_info=True)
+        return None
+    finally:
+        # Важно: всегда возвращайте соединение в пул!
+        if conn:
+            await pool.release(conn) # Используем 'pool'
 
-        # Предполагается, что вы уже исправили `c.client_name` на `c.name` или другое правильное имя
-        # в SELECT-запросе, как мы обсуждали ранее.
+
+async def get_unconfirmed_orders(pool): # Добавили 'pool' как аргумент
+    conn = None
+    try:
+        # Получаем соединение из ПЕРЕДАННОГО пула
+        conn = await pool.acquire() # Используем 'pool'
+
         query = """
         SELECT
             o.order_id,
             o.order_date,
             o.delivery_date,
-            c.name, -- ИЛИ c.client_name, если так называется столбец в вашей БД. Важно, чтобы здесь было фактическое имя.
+            c.name,
             a.address_text,
             o.total_amount
         FROM
@@ -92,132 +100,144 @@ async def get_unconfirmed_orders():
         ORDER BY
             o.order_date DESC, o.order_id DESC;
         """
-
-        # Получаем строки как кортежи
-        rows = await conn.fetch(query)
+        
+        rows = await conn.fetch(query) # asyncpg.fetch возвращает список Record объектов
+        
         unconfirmed_orders = [
             UnconfirmedOrder(
                 row['order_id'], 
                 row['order_date'], 
                 row['delivery_date'], 
-                row['name'], # Или 'client_name', в зависимости от вашего SELECT
+                row['name'], 
                 row['address_text'], 
                 row['total_amount']
             ) for row in rows
         ]
         
-         # Преобразуем каждый кортеж в объект UnconfirmedOrder
-
         logger.info(f"Получено {len(unconfirmed_orders)} неподтвержденных заказов.")
         return unconfirmed_orders
 
+    except asyncpg.exceptions.PostgresError as e:
+        logger.error(f"Ошибка asyncpg при получении неподтвержденных заказов: {e}", exc_info=True)
+        return []
     except Exception as e:
-        logger.error(f"Ошибка при получении неподтвержденных заказов: {e}", exc_info=True)
+        logger.error(f"Неизвестная ошибка при получении неподтвержденных заказов: {e}", exc_info=True)
         return []
     finally:
         if conn:
-            await conn.close()
+            await pool.release(conn) # Используем 'pool'
 
-async def confirm_order_in_db(order_id: int):
+
+async def confirm_order_in_db(pool, order_id: int): # Добавили 'pool' как аргумент
     """
     Подтверждает один заказ в БД, устанавливая статус 'confirmed'
-    и генерируя номер накладной.
+    и генерируя номер накладной (используя asyncpg).
     """
     conn = None
-    cur = None
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        # Простая генерация номера накладной (можно усложнить)
+        conn = await pool.acquire() # Используем 'pool'
+        
         invoice_number = f"INV-{date.today().strftime('%Y%m%d')}-{order_id}"
-        cur.execute("""
+        
+        # asyncpg.execute используется для операций INSERT, UPDATE, DELETE
+        await conn.execute("""
             UPDATE orders
-            SET status = 'confirmed', invoice_number = %s
-            WHERE order_id = %s;
-        """, (invoice_number, order_id))
-        conn.commit()
+            SET status = 'confirmed', invoice_number = $1
+            WHERE order_id = $2;
+        """, invoice_number, order_id)
+        
         logger.info(f"Заказ #{order_id} подтвержден и сформирована накладная: {invoice_number}")
         return True
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при подтверждении заказа #{order_id}: {e}")
-        if conn: conn.rollback()
+    except asyncpg.exceptions.PostgresError as e:
+        logger.error(f"Ошибка asyncpg при подтверждении заказа #{order_id}: {e}", exc_info=True)
+        return False
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при подтверждении заказа #{order_id}: {e}", exc_info=True)
         return False
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if conn:
+            await pool.release(conn) # Используем 'pool'
 
-async def cancel_order_in_db(order_id: int):
+
+async def cancel_order_in_db(pool, order_id: int): # Добавили 'pool' как аргумент
     """
-    Отменяет один заказ, удаляя его из БД.
+    Отменяет один заказ, удаляя его из БД (используя asyncpg).
     """
     conn = None
-    cur = None
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
+        conn = await pool.acquire() # Используем 'pool'
+        
+        await conn.execute("""
             DELETE FROM orders
-            WHERE order_id = %s;
-        """, (order_id,))
-        conn.commit()
+            WHERE order_id = $1;
+        """, order_id)
+        
         logger.info(f"Заказ #{order_id} отменен и удален из БД.")
         return True
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при отмене и удалении заказа #{order_id}: {e}")
-        if conn: conn.rollback()
+    except asyncpg.exceptions.PostgresError as e:
+        logger.error(f"Ошибка asyncpg при отмене и удалении заказа #{order_id}: {e}", exc_info=True)
+        return False
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при отмене и удалении заказа #{order_id}: {e}", exc_info=True)
         return False
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if conn:
+            await pool.release(conn) # Используем 'pool'
 
-async def confirm_all_orders_in_db(order_ids: list[int]):
+
+async def confirm_all_orders_in_db(pool, order_ids: list[int]): # Добавили 'pool' как аргумент
     """
-    Массовое подтверждение заказов.
+    Массовое подтверждение заказов (используя asyncpg и транзакцию).
     """
     conn = None
-    cur = None
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        for order_id in order_ids:
-            invoice_number = f"INV-{date.today().strftime('%Y%m%d')}-{order_id}"
-            cur.execute("""
-                UPDATE orders
-                SET status = 'confirmed', invoice_number = %s
-                WHERE order_id = %s;
-            """, (invoice_number, order_id))
-        conn.commit()
+        conn = await pool.acquire() # Используем 'pool'
+        # Используем транзакцию для массовых операций
+        async with conn.transaction():
+            for order_id in order_ids:
+                invoice_number = f"INV-{date.today().strftime('%Y%m%d')}-{order_id}"
+                await conn.execute("""
+                    UPDATE orders
+                    SET status = 'confirmed', invoice_number = $1
+                    WHERE order_id = $2;
+                """, invoice_number, order_id)
+        
         logger.info(f"Все выбранные заказы ({len(order_ids)}) подтверждены.")
         return True
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при массовом подтверждении заказов: {e}")
-        if conn: conn.rollback()
+    except asyncpg.exceptions.PostgresError as e:
+        logger.error(f"Ошибка asyncpg при массовом подтверждении заказов: {e}", exc_info=True)
+        return False
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при массовом подтверждении заказов: {e}", exc_info=True)
         return False
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if conn:
+            await pool.release(conn) # Используем 'pool'
 
-async def cancel_all_orders_in_db(order_ids: list[int]):
+
+async def cancel_all_orders_in_db(pool, order_ids: list[int]): # Добавили 'pool' как аргумент
     """
-    Массовая отмена заказов и их удаление из БД.
+    Массовая отмена заказов и их удаление из БД (используя asyncpg и транзакцию).
     """
     conn = None
-    cur = None
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        for order_id in order_ids:
-            cur.execute("""
-                DELETE FROM orders
-                WHERE order_id = %s;
-            """, (order_id,))
-        conn.commit()
+        conn = await pool.acquire() # Используем 'pool'
+        # Используем транзакцию для массовых операций
+        async with conn.transaction():
+            for order_id in order_ids:
+                await conn.execute("""
+                    DELETE FROM orders
+                    WHERE order_id = $1;
+                """, order_id)
+        
         logger.info(f"Все выбранные заказы ({len(order_ids)}) отменены и удалены.")
         return True
-    except psycopg2.Error as e:
-        logger.error(f"Ошибка при массовой отмене и удалении заказов: {e}")
-        if conn: conn.rollback()
+    except asyncpg.exceptions.PostgresError as e:
+        logger.error(f"Ошибка asyncpg при массовой отмене и удалении заказов: {e}", exc_info=True)
+        return False
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при массовой отмене и удалении заказов: {e}", exc_info=True)
         return False
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if conn:
+            await pool.release(conn) # Используем 'pool'
