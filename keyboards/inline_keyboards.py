@@ -57,3 +57,25 @@ def delivery_date_keyboard(start_date: date) -> InlineKeyboardMarkup:
     keyboard_buttons.append([InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_cart_main_menu")])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+def create_confirm_report_keyboard(order_ids: list[int]) -> InlineKeyboardMarkup:
+    """
+    Создает инлайн-клавиатуру для отчета о неподтвержденных заказах.
+    Включает кнопки для подтверждения/отмены всех заказов и для каждого отдельного заказа.
+    """
+    keyboard_buttons = []
+
+    # Кнопки для всех заказов
+    keyboard_buttons.append([
+        InlineKeyboardButton(text="✅ Подтвердить все", callback_data="confirm_all_orders"),
+        InlineKeyboardButton(text="❌ Отменить все", callback_data="cancel_all_orders")
+    ])
+
+    # Кнопки для каждого отдельного заказа
+    for order_id in order_ids:
+        keyboard_buttons.append([
+            InlineKeyboardButton(text=f"✅ Подтвердить Заказ #{order_id}", callback_data=f"confirm_order_{order_id}"),
+            InlineKeyboardButton(text=f"❌ Отменить Заказ #{order_id}", callback_data=f"cancel_order_{order_id}")
+        ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)

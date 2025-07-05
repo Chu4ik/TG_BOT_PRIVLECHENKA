@@ -10,9 +10,12 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove, InlineKey
 from aiogram.filters import StateFilter
 from aiogram.exceptions import TelegramBadRequest
 
+# ОБНОВЛЕННЫЕ ИМПОРТЫ
 from handlers.orders.order_helpers import _get_cart_summary_text 
-from utils.order_cache import order_cache
-from keyboards.inline_keyboards import build_cart_keyboard, delivery_date_keyboard, build_edit_item_menu_keyboard # ИМПОРТИРУЕМ build_edit_item_menu_keyboard
+from utils.order_cache import order_cache # <--- Убедитесь, что order_cache импортирован
+# Импортируем get_connection и get_employee_id из db_operations.db
+from db_operations.db import get_connection, get_employee_id # <--- ДОБАВИТЬ/ИЗМЕНИТЬ ЭТУ СТРОКУ
+from keyboards.inline_keyboards import build_cart_keyboard, delivery_date_keyboard, build_edit_item_menu_keyboard
 from states.order import OrderFSM
 
 def escape_markdown_v2(text: str) -> str:
@@ -110,6 +113,9 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
     state_data = await state.get_data()
     cart_items = state_data.get("cart", [])
     delivery_date = state_data.get("delivery_date")
+    client_id = state_data.get("client_id")
+    address_id = state_data.get("address_id")
+    
     client_name = state_data.get("client_name") 
     address_text = state_data.get("address_text") 
 
@@ -122,7 +128,16 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Пожалуйста, выберите дату доставки перед подтверждением заказа.", show_alert=True)
         await edit_delivery_date(callback, state)
         return
+        
+    if not client_id:
+        await callback.answer("Пожалуйста, выберите клиента для заказа.", show_alert=True)
+        return
 
+    if not address_id:
+        await callback.answer("Пожалуйста, выберите адрес доставки для заказа.", show_alert=True)
+        return
+
+    # --- НАЧАЛО БЛОКА ГЕНЕРАЦИИ ТЕКСТА СВОДКИ (ПЕРЕМЕЩЕНО ВВЕРХ) ---
     raw_summary_content = await _get_cart_summary_text(cart_items, delivery_date, client_name, address_text)
     
     formatted_summary_lines = []
@@ -130,9 +145,9 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
     for line in lines:
         if line.startswith("---"):
             formatted_summary_lines.append(line)
-        elif line.startswith("Клиент:"): 
+        elif line.startswith("Клиент:"):
             formatted_summary_lines.append(f"*{line}*")
-        elif line.startswith("Адрес:"): 
+        elif line.startswith("Адрес:"):
             formatted_summary_lines.append(f"*{line}*")
         elif line.startswith("Дата доставки:"):
             formatted_summary_lines.append(f"*{line}*")
@@ -149,21 +164,85 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext):
 
     pre_escaped_text_for_confirm = "\n".join(formatted_summary_lines)
     escaped_summary_text = escape_markdown_v2(pre_escaped_text_for_confirm)
+    # --- КОНЕЦ БЛОКА ГЕНЕРАЦИИ ТЕКСТА СВОДКИ ---
 
+
+    # --- НАЧАЛО БЛОКА СОХРАНЕНИЯ В БД (ОСТАЕТСЯ ПОСЛЕ ГЕНЕРАЦИИ ТЕКСТА) ---
+    total = sum(item["quantity"] * item["price"] for item in cart_items)
+    employee_id = get_employee_id(user_id)
+
+    if employee_id is None:
+        logger.error(f"Не удалось получить employee_id для пользователя {user_id}. Заказ не сохранен.")
+        await callback.answer("Ошибка: Не удалось определить сотрудника. Заказ не может быть сохранен.", show_alert=True)
+        # Также отправляем сообщение в чат, так как подтверждение ответа может быть недостаточно заметно
+        await callback.message.edit_text(
+            f"{escape_markdown_v2('❌ Ошибка при подтверждении заказа: Не удалось определить сотрудника. Пожалуйста, обратитесь к администратору.')}",
+            parse_mode="MarkdownV2",
+            reply_markup=None
+        )
+        await state.clear() # Очищаем состояние даже при ошибке, чтобы избежать зацикливания
+        return
+
+    conn = None
+    cur = None
+    order_id = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT INTO orders (order_date, delivery_date, employee_id, client_id, address_id, total_amount, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'draft')
+            RETURNING order_id;
+        """, (date.today(), delivery_date, employee_id, client_id, address_id, total))
+        order_id = cur.fetchone()[0]
+
+        for item in cart_items:
+            cur.execute("""
+                INSERT INTO order_lines (order_id, product_id, quantity, unit_price)
+                VALUES (%s, %s, %s, %s)
+            """, (order_id, item["product_id"], item["quantity"], item["price"]))
+
+        conn.commit()
+        logger.info(f"Заказ #{order_id} сохранен в БД со статусом 'draft'. Общая сумма: {total:.2f}")
+
+        order_cache.pop(user_id, None) 
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении заказа в БД для пользователя {user_id}: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        await callback.answer("Произошла ошибка при сохранении заказа. Пожалуйста, попробуйте снова.", show_alert=True)
+        # Отправляем сообщение об ошибке в чат
+        await callback.message.edit_text(
+            f"{escape_markdown_v2('❌ Произошла ошибка при сохранении заказа в базу данных. Пожалуйста, попробуйте снова или обратитесь к администратору.')}",
+            parse_mode="MarkdownV2",
+            reply_markup=None
+        )
+        await state.clear() # Очищаем состояние даже при ошибке
+        return 
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+    # --- КОНЕЦ БЛОКА СОХРАНЕНИЯ В БД ---
+
+
+    # --- СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ (ТЕПЕРЬ escaped_summary_text ВСЕГДА ОПРЕДЕЛЕНО) ---
     final_message = (
         f"{escape_markdown_v2('✅ Ваш заказ подтвержден!')}\n\n"
-        f"{escaped_summary_text}\n\n"
+        f"{escaped_summary_text}\n\n" # <--- Теперь эта переменная всегда определена
         f"{escape_markdown_v2('Мы свяжемся с вами для уточнения деталей.')}"
     )
 
     await callback.message.edit_text(
         final_message,
         parse_mode="MarkdownV2",
-        reply_markup=None 
+        reply_markup=None
     )
     await callback.answer("Заказ подтвержден!", show_alert=True)
-    await state.clear() 
-
 
 @router.callback_query(F.data.startswith("edit_quantity:"))
 async def edit_cart_item_quantity(callback: CallbackQuery, state: FSMContext):

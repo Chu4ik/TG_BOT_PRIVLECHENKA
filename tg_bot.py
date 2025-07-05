@@ -7,6 +7,7 @@ from config import TELEGRAM_TOKEN
 
 # Імпортуємо всі роутери з загального списку
 from handlers import order_routers
+from handlers.reports import order_confirmation_report
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +34,7 @@ async def set_main_menu_commands(bot: Bot):
         BotCommand(command="/start", description="Начать работу с ботом"),
         BotCommand(command="/new_order", description="Создать новый заказ"),
         BotCommand(command="/my_orders", description="Посмотреть мои заказы"),
+        BotCommand(command="/show_unconfirmed_orders", description="Показать draft заказы"),
         # Добавьте другие команды, если они у вас есть, например:
         # BotCommand(command="/help", description="Получить помощь")
     ]
