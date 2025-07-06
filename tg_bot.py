@@ -1,10 +1,13 @@
+# tg_bot/main.py
+
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand 
 from config import TELEGRAM_TOKEN
-
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties # <--- ДОБАВЬТЕ ЭТОТ ИМПОРТ
 
 # Импортируем функции для работы с пулом базы данных
 from db_operations import init_db_pool, close_db_pool, get_employee_id
@@ -20,7 +23,11 @@ logging.basicConfig(
 )
 
 # Створення бота
-bot = Bot(token=TELEGRAM_TOKEN)
+# bot = Bot(token=TELEGRAM_TOKEN, parse_mode=ParseMode.MARKDOWN_V2) # <-- СТАРЫЙ СПОСОБ (УДАЛИТЕ ИЛИ ЗАКОММЕНТИРУЙТЕ)
+bot = Bot(
+    token=TELEGRAM_TOKEN, 
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN_V2) # <--- НОВЫЙ СПОСОБ УСТАНОВКИ PARSE_MODE ПО УМОЛЧАНИЮ
+)
 
 # Створення диспетчера
 dp = Dispatcher(storage=MemoryStorage())
@@ -77,4 +84,3 @@ async def main():
         logging.info("🧹 Завершение работы бота...")
         # Закрываем сессию бота при завершении работы
         await bot.session.close()
-
