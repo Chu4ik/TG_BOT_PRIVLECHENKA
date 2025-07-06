@@ -27,4 +27,5 @@ class OrderFSM(StatesGroup):
     # Дополнительные состояния (если есть, например, для подтверждения заказа)
     confirming_order = State()           # Состояние перед окончательным подтверждением заказа
     # add_new_address = State()          # Пример: если будет функционал добавления нового адреса
-
+    viewing_unpaid_invoices_list = State()
+    entering_partial_payment_amount = State()

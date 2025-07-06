@@ -1,10 +1,11 @@
 # db_operations/report_order_confirmation.py
 
 import asyncpg
-from datetime import date, timedelta, datetime # Добавляем datetime для confirm_order_in_db
+from datetime import date, timedelta, datetime
 from collections import namedtuple
 import logging
-from typing import Optional, List, Dict # Добавляем List, Dict, Optional для типизации
+from typing import Optional, List, Dict
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,6 @@ UnconfirmedOrder = namedtuple(
     ]
 )
 
-# Новый namedtuple для деталей позиции заказа
 OrderDetail = namedtuple(
     "OrderDetail",
     [
@@ -31,9 +31,25 @@ OrderDetail = namedtuple(
     ]
 )
 
+# НОВЫЙ namedtuple для отображения неоплаченных накладных (если вы его переместили сюда)
+UnpaidInvoice = namedtuple(
+    "UnpaidInvoice",
+    [
+        "order_id",
+        "invoice_number",
+        "confirmation_date",
+        "client_name",
+        "total_amount",
+        "amount_paid",
+        "outstanding_balance", # Рассчитанное поле
+        "payment_status",
+        "due_date"
+    ]
+)
+
 
 async def get_unconfirmed_orders(pool):
-    # ... (существующий код get_unconfirmed_orders) ...
+    # ... (ваш существующий код) ...
     conn = None
     try:
         conn = await pool.acquire()
@@ -86,9 +102,7 @@ async def get_unconfirmed_orders(pool):
 
 
 async def get_unconfirmed_order_full_details(pool, order_id: int) -> Optional[Dict]:
-    """
-    Получает полную информацию о конкретном неподтвержденном заказе, включая его строки (товары).
-    """
+    # ... (ваш существующий код) ...
     conn = None
     try:
         conn = await pool.acquire()
@@ -108,7 +122,7 @@ async def get_unconfirmed_order_full_details(pool, order_id: int) -> Optional[Di
             JOIN
                 addresses a ON o.address_id = a.address_id
             WHERE
-                o.order_id = $1 AND o.status = 'draft'; -- Убедимся, что это черновик
+                o.order_id = $1 AND o.status = 'draft';
         """, order_id)
 
         if not order_row:
@@ -143,7 +157,7 @@ async def get_unconfirmed_order_full_details(pool, order_id: int) -> Optional[Di
                 product_name=item_row['name'],
                 quantity=item_row['quantity'],
                 unit_price=item_row['unit_price'],
-                total_item_amount=item_row['quantity'] * item_row['unit_price'] # Расчет здесь
+                total_item_amount=item_row['quantity'] * item_row['unit_price']
             ))
         
         return order_details
@@ -160,25 +174,41 @@ async def get_unconfirmed_order_full_details(pool, order_id: int) -> Optional[Di
 
 async def confirm_order_in_db(pool, order_id: int):
     """
-    Подтверждает один заказ в БД, устанавливая статус 'confirmed'
-    и генерируя номер накладной (используя asyncpg).
+    Подтверждает один заказ в БД, устанавливая статус 'confirmed',
+    генерируя номер накладной (дата из delivery_date), устанавливая confirmation_date = delivery_date и due_date.
     """
     conn = None
     try:
         conn = await pool.acquire()
+
+        # Сначала получаем delivery_date для этого заказа
+        order_info = await conn.fetchrow("SELECT delivery_date FROM orders WHERE order_id = $1 AND status = 'draft';", order_id)
+        if not order_info:
+            logger.warning(f"Заказ #{order_id} не найден или уже не в статусе 'draft' для подтверждения.")
+            return False
+
+        delivery_date_for_invoice = order_info['delivery_date'] # <--- ПОЛУЧАЕМ ДАТУ ДОСТАВКИ
+
+        # Формируем invoice_number, используя delivery_date
+        invoice_number = f"INV-{delivery_date_for_invoice.strftime('%Y%m%d')}-{order_id}" # <--- ИЗМЕНЕНО
         
-        invoice_number = f"INV-{date.today().strftime('%Y%m%d')}-{order_id}"
+        # confirmation_date теперь равна delivery_date
+        confirmation_date_val = delivery_date_for_invoice 
         
-        # asyncpg.execute используется для операций INSERT, UPDATE, DELETE
-        # Добавляем confirmation_date
+        # Рассчитываем due_date: например, 7 дней после delivery_date (которая теперь confirmation_date)
+        due_date_calculated = confirmation_date_val + timedelta(days=7) 
+
         result = await conn.execute("""
             UPDATE orders
-            SET status = 'confirmed', invoice_number = $1, confirmation_date = $2
-            WHERE order_id = $3 AND status = 'draft';
-        """, invoice_number, datetime.now(), order_id)
+            SET status = 'confirmed',
+                invoice_number = $1,
+                confirmation_date = $2,
+                due_date = $3
+            WHERE order_id = $4 AND status = 'draft';
+        """, invoice_number, confirmation_date_val, due_date_calculated, order_id)
         
         if result == 'UPDATE 1':
-            logger.info(f"Заказ #{order_id} подтвержден и сформирована накладная: {invoice_number}")
+            logger.info(f"Заказ #{order_id} подтвержден, сформирована накладная: {invoice_number}, дата накладной (доставки): {confirmation_date_val}, срок оплаты: {due_date_calculated}")
             return True
         else:
             logger.warning(f"Заказ #{order_id} не был подтвержден (статус не 'draft' или не найден).")
@@ -195,20 +225,17 @@ async def confirm_order_in_db(pool, order_id: int):
 
 
 async def cancel_order_in_db(pool, order_id: int):
-    """
-    Отменяет один заказ, устанавливая статус 'cancelled'.
-    """
+    # ... (ваш существующий код) ...
     conn = None
     try:
         conn = await pool.acquire()
-
-        # Изменяем статус заказа на 'cancelled'
+        
         result = await conn.execute("""
             UPDATE orders
             SET status = 'cancelled'
-            WHERE order_id = $1; -- Убираем проверку на 'draft', чтобы можно было отменить любой заказ
+            WHERE order_id = $1;
         """, order_id)
-
+        
         if result == 'UPDATE 1':
             logger.info(f"Заказ #{order_id} успешно отменен (статус изменен на 'cancelled').")
             return True
@@ -228,23 +255,39 @@ async def cancel_order_in_db(pool, order_id: int):
 
 async def confirm_all_orders_in_db(pool, order_ids: list[int]):
     """
-    Массовое подтверждение заказов (используя asyncpg и транзакцию).
+    Массовое подтверждение заказов (используя asyncpg и транзакцию),
+    устанавливая confirmation_date = delivery_date и due_date,
+    и формируя invoice_number на основе delivery_date.
     """
     conn = None
     try:
         conn = await pool.acquire()
-        # Используем транзакцию для массовых операций
         async with conn.transaction():
             for order_id in order_ids:
-                invoice_number = f"INV-{date.today().strftime('%Y%m%d')}-{order_id}"
-                # Добавляем confirmation_date
+                # Для каждого заказа получаем delivery_date
+                order_info = await conn.fetchrow("SELECT delivery_date FROM orders WHERE order_id = $1 AND status = 'draft';", order_id)
+                if not order_info:
+                    logger.warning(f"Заказ #{order_id} не найден или уже не в статусе 'draft' для массового подтверждения. Пропускаем.")
+                    continue 
+
+                delivery_date_for_invoice = order_info['delivery_date']
+
+                # Формируем invoice_number, используя delivery_date
+                invoice_number = f"INV-{delivery_date_for_invoice.strftime('%Y%m%d')}-{order_id}" # <--- ИЗМЕНЕНО
+                
+                confirmation_date_val = delivery_date_for_invoice
+                due_date_calculated = confirmation_date_val + timedelta(days=7)
+
                 await conn.execute("""
                     UPDATE orders
-                    SET status = 'confirmed', invoice_number = $1, confirmation_date = $2
-                    WHERE order_id = $3 AND status = 'draft';
-                """, invoice_number, datetime.now(), order_id)
+                    SET status = 'confirmed',
+                        invoice_number = $1,
+                        confirmation_date = $2,
+                        due_date = $3
+                    WHERE order_id = $4 AND status = 'draft';
+                """, invoice_number, confirmation_date_val, due_date_calculated, order_id)
         
-        logger.info(f"Все выбранные заказы ({len(order_ids)}) подтверждены.")
+        logger.info(f"Все выбранные заказы ({len(order_ids)}) подтверждены. Даты накладных (доставки) и сроки оплаты установлены.")
         return True
     except asyncpg.exceptions.PostgresError as e:
         logger.error(f"Ошибка asyncpg при массовом подтверждении заказов: {e}", exc_info=True)
@@ -256,29 +299,27 @@ async def confirm_all_orders_in_db(pool, order_ids: list[int]):
         if conn:
             await pool.release(conn)
 
-
 async def cancel_all_orders_in_db(pool, order_ids: list[int]):
-    """
-    Массовая отмена заказов, устанавливая статус 'cancelled'.
-    """
+    # ... (ваш существующий код) ...
     conn = None
     try:
         conn = await pool.acquire()
+        # Используем транзакцию для массовых операций
         async with conn.transaction():
             for order_id in order_ids:
                 await conn.execute("""
                     UPDATE orders
                     SET status = 'cancelled'
-                    WHERE order_id = $1; -- Убираем проверку на 'draft'
+                    WHERE order_id = $1;
                 """, order_id)
-
-        logger.info(f"Все выбранные заказы ({len(order_ids)}) успешно отменены.")
+        
+        logger.info(f"Все выбранные заказы ({len(order_ids)}) отменены.")
         return True
     except asyncpg.exceptions.PostgresError as e:
-        logger.error(f"Ошибка asyncpg при массовой отмене заказов: {e}", exc_info=True)
+        logger.error(f"Ошибка asyncpg при массовой отмене и удалении заказов: {e}", exc_info=True)
         return False
     except Exception as e:
-        logger.error(f"Неизвестная ошибка при массовой отмене заказов: {e}", exc_info=True)
+        logger.error(f"Неизвестная ошибка при массовой отмене и удалении заказов: {e}", exc_info=True)
         return False
     finally:
         if conn:
