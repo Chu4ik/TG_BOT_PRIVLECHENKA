@@ -4,7 +4,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command 
 from states.order import OrderFSM 
-from db_operations.db import get_unconfirmed_orders, confirm_order_in_db, cancel_order_in_db, confirm_all_orders_in_db, cancel_all_orders_in_db 
+from db_operations.report_order_confirmation import \
+    get_unconfirmed_orders, confirm_order_in_db, cancel_order_in_db, \
+    confirm_all_orders_in_db, cancel_all_orders_in_db 
 from datetime import date
 import re
 from keyboards.inline_keyboards import create_confirm_report_keyboard
@@ -25,7 +27,9 @@ def build_order_list_keyboard(orders: list) -> InlineKeyboardMarkup:
     buttons = []
     
     for order_id, order_date, client_name, total_amount in orders:
-        escaped_client_name = client_name.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')
+        # Убедитесь, что здесь тоже используется escape_markdown_v2 для client_name
+        # если он может содержать спецсимволы и отображается в тексте кнопки
+        escaped_client_name = escape_markdown_v2(client_name)
         buttons.append([
             InlineKeyboardButton(text=f"Заказ №{order_id} ({escaped_client_name}) - {total_amount:.2f}₴", 
                                  callback_data=f"view_order_{order_id}")
@@ -39,7 +43,7 @@ def build_order_list_keyboard(orders: list) -> InlineKeyboardMarkup:
 
 @router.message(F.text == "/show_unconfirmed_orders")
 @router.callback_query(F.data == "show_unconfirmed_orders")
-async def show_unconfirmed_orders_report(callback_or_message, state: FSMContext, db_pool): # <--- ДОБАВЛЕНО: db_pool
+async def show_unconfirmed_orders_report(callback_or_message, state: FSMContext, db_pool):
     message_object: Message | None = None 
 
     if isinstance(callback_or_message, CallbackQuery):
@@ -58,7 +62,6 @@ async def show_unconfirmed_orders_report(callback_or_message, state: FSMContext,
 
     logger.info("Показ отчета о неподтвержденных заказов.")
     
-    # ИСПРАВЛЕНИЕ: Передаем db_pool в get_unconfirmed_orders
     unconfirmed_orders = await get_unconfirmed_orders(db_pool) 
 
     if not unconfirmed_orders:
@@ -97,50 +100,61 @@ async def show_unconfirmed_orders_report(callback_or_message, state: FSMContext,
 
 
 @router.callback_query(F.data == "confirm_all_orders")
-async def handle_confirm_all_orders(callback: CallbackQuery, state: FSMContext, db_pool): # <--- ДОБАВЛЕНО: db_pool
+async def handle_confirm_all_orders(callback: CallbackQuery, state: FSMContext, db_pool):
     """
     Обрабатывает нажатие на кнопку "Подтвердить все заказы".
     """
-    # ИСПРАВЛЕНИЕ: Передаем db_pool в get_unconfirmed_orders
     orders_to_confirm = await get_unconfirmed_orders(db_pool) 
     order_ids = [order[0] for order in orders_to_confirm] 
 
     if not order_ids:
         await callback.answer("Нет заказов для подтверждения.", show_alert=True)
+        # Если нет заказов, можно удалить сообщение или оставить его как есть
+        # await callback.message.delete() 
         return
 
-    # ИСПРАВЛЕНИЕ: Передаем db_pool в confirm_all_orders_in_db
     success = await confirm_all_orders_in_db(db_pool, order_ids) 
     if success:
-        await callback.message.edit_text("✅ Все неподтвержденные заказы успешно подтверждены и сформированы накладные!")
+        # Уведомление пользователя о успехе (всплывающее)
+        await callback.answer(f"✅ Все {len(order_ids)} заказов успешно подтверждены!", show_alert=False)
+        # Редактирование сообщения для постоянного отображения
+        await callback.message.edit_text(escape_markdown_v2(f"✅ Все {len(order_ids)} неподтвержденных заказов успешно подтверждены и сформированы накладные!"), parse_mode="MarkdownV2")
     else:
-        await callback.message.edit_text("❌ Произошла ошибка при подтверждении всех заказов.")
-    await callback.answer()
-    # ИСПРАВЛЕНИЕ: Передаем db_pool в show_unconfirmed_orders_report
+        # Уведомление пользователя об ошибке (алерт)
+        await callback.answer("❌ Произошла ошибка при подтверждении всех заказов.", show_alert=True)
+        # Редактирование сообщения для постоянного отображения
+        await callback.message.edit_text(escape_markdown_v2("❌ Произошла ошибка при подтверждении всех заказов."), parse_mode="MarkdownV2")
+    
+    # После подтверждения/отмены, обновите отчет
     await show_unconfirmed_orders_report(callback, state, db_pool) 
 
 
 @router.callback_query(F.data == "cancel_all_orders")
-async def handle_cancel_all_orders(callback: CallbackQuery, state: FSMContext, db_pool): # <--- ДОБАВЛЕНО: db_pool
+async def handle_cancel_all_orders(callback: CallbackQuery, state: FSMContext, db_pool):
     """
     Обрабатывает нажатие на кнопку "Отменить все заказы".
     """
-    # ИСПРАВЛЕНИЕ: Передаем db_pool в get_unconfirmed_orders
     orders_to_cancel = await get_unconfirmed_orders(db_pool) 
     order_ids = [order[0] for order in orders_to_cancel] 
 
     if not order_ids:
         await callback.answer("Нет заказов для отмены.", show_alert=True)
+        # await callback.message.delete()
         return
 
-    # ИСПРАВЛЕНИЕ: Передаем db_pool в cancel_all_orders_in_db
     success = await cancel_all_orders_in_db(db_pool, order_ids) 
     if success:
-        await callback.message.edit_text("🗑️ Все неподтвержденные заказы успешно отменены и удалены.")
+        # Уведомление пользователя о успехе (всплывающее)
+        await callback.answer(f"🗑️ Все {len(order_ids)} заказов успешно отменены!", show_alert=False)
+        # Редактирование сообщения для постоянного отображения
+        await callback.message.edit_text(escape_markdown_v2(f"🗑️ Все {len(order_ids)} неподтвержденных заказов успешно отменены и удалены."), parse_mode="MarkdownV2")
     else:
-        await callback.message.edit_text("❌ Произошла ошибка при отмене всех заказов.")
-    await callback.answer()
-    # ИСПРАВЛЕНИЕ: Передаем db_pool в show_unconfirmed_orders_report
+        # Уведомление пользователя об ошибке (алерт)
+        await callback.answer("❌ Произошла ошибка при отмене всех заказов.", show_alert=True)
+        # Редактирование сообщения для постоянного отображения
+        await callback.message.edit_text(escape_markdown_v2("❌ Произошла ошибка при отмене всех заказов."), parse_mode="MarkdownV2")
+    
+    # После подтверждения/отмены, обновите отчет
     await show_unconfirmed_orders_report(callback, state, db_pool)
 
 @router.callback_query(F.data.startswith("view_order_"))

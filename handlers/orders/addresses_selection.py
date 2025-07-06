@@ -21,24 +21,26 @@ def build_address_keyboard(addresses: list) -> InlineKeyboardMarkup:
     for addr in addresses:
         buttons.append([InlineKeyboardButton(text=addr['address_text'], callback_data=f"address:{addr['address_id']}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 @router.callback_query(F.data.startswith("address:"))
-async def process_address_selection(callback: CallbackQuery, state: FSMContext, db_pool): # <--- ДОБАВЬТЕ db_pool СЮДА
+async def process_address_selection(callback: CallbackQuery, state: FSMContext, db_pool): # <--- db_pool здесь
     address_id = int(callback.data.split(":")[1])
     conn = None
     try:
-        conn = await db_pool.acquire() # Эта строка (или похожая) требует 'pool'
-        # Получаем данные адреса, чтобы сохранить client_id, address_id и т.д.
-        # Вероятно, это запрос, который был у вас на строке 57
+        conn = await db_pool.acquire()
         address_info = await conn.fetchrow("SELECT client_id, address_text FROM addresses WHERE address_id = $1", address_id)
         
         if address_info:
             await state.update_data(address_id=address_id, address_text=address_info['address_text'])
-            await callback.answer(f"Адрес выбран: {address_info['address_text']}", show_alert=True)
-            await callback.message.edit_text(f"✅ Выбран адрес: *{address_info['address_text']}*", parse_mode="MarkdownV2", reply_markup=None)
             
-            # Переходим к следующему состоянию, например, выбору продукта
-            await send_all_products(callback.message, state, db_pool) # Пример, передайте db_pool, если send_all_products его использует
-            await state.set_state(OrderFSM.selecting_product) # Пример состояния
+            # Экранируем текст адреса перед использованием его в MarkdownV2
+            escaped_address_text = escape_markdown_v2(address_info['address_text'])
+            
+            await callback.answer(f"Адрес выбран: {address_info['address_text']}", show_alert=True)
+            await callback.message.edit_text(f"✅ Выбран адрес: *{escaped_address_text}*", parse_mode="MarkdownV2", reply_markup=None)
+            
+            await send_all_products(callback.message, state, db_pool)
+            await state.set_state(OrderFSM.selecting_product)
         else:
             await callback.answer("Ошибка при выборе адреса. Попробуйте снова.", show_alert=True)
 
@@ -50,8 +52,7 @@ async def process_address_selection(callback: CallbackQuery, state: FSMContext, 
         await callback.answer("Произошла непредвиденная ошибка. Попробуйте снова.", show_alert=True)
     finally:
         if conn:
-            await db_pool.release(conn) # Используйте db_pool и здесь
-    await callback.answer()
+            await db_pool.release(conn)
 
 # Любые другие функции в этом файле, которые напрямую запрашивают базу данных, также нуждаются в 'pool' в качестве аргумента.
 # Например, если у вас есть вспомогательная функция для получения адресов:

@@ -15,7 +15,7 @@ from handlers.orders.order_helpers import _get_cart_summary_text
 from utils.order_cache import order_cache 
 
 # Теперь импортируем только get_employee_id. db_pool будет передаваться.
-from db_operations.db import get_employee_id # <--- ИЗМЕНЕНО
+from db_operations import get_employee_id # <--- ИЗМЕНЕНО
 import asyncpg.exceptions # Добавляем импорт для асинхронных ошибок БД
 
 from keyboards.inline_keyboards import build_cart_keyboard, delivery_date_keyboard, build_edit_item_menu_keyboard
@@ -194,7 +194,6 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, db_pool): # 
         conn = await db_pool.acquire() # Получаем соединение из пула
         async with conn.transaction(): # Используем асинхронный контекстный менеджер для транзакций
             # Вставка в таблицу orders
-            # Используем $1, $2... для параметров и fetchrow для RETURNING
             order_row = await conn.fetchrow("""
                 INSERT INTO orders (order_date, delivery_date, employee_id, client_id, address_id, total_amount, status)
                 VALUES ($1, $2, $3, $4, $5, $6, 'draft')
@@ -211,6 +210,20 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, db_pool): # 
 
         # Если мы дошли до сюда, транзакция успешно завершена (commit происходит автоматически)
         logger.info(f"Заказ #{order_id} сохранен в БД со статусом 'draft'. Общая сумма: {total:.2f}")
+
+        # --- ДОБАВЛЕННЫЕ СТРОКИ ---
+        # 1. Отвечаем на callback_query, чтобы убрать "зависание" кнопки
+        await callback.answer("✅ Заказ успешно сохранен!", show_alert=False) 
+        
+        # 2. Изменяем сообщение, чтобы подтвердить сохранение
+        text_to_send = f"✅ *Заказ №{order_id}* успешно сформирован и сохранен в базе данных.\nОбщая сумма: *{total:.2f}* грн.\n"
+        escaped_text_to_send = escape_markdown_v2(text_to_send)
+        await callback.message.edit_text(
+            #f"✅ *Заказ №{order_id}* успешно сформирован и сохранен в базе данных\\.\nОбщая сумма: *{total:.2f}* грн\\.\n", # <-- А здесь используете СТАРУЮ, РУЧНУЮ ЭКРАНИРОВАННУЮ строку
+            escaped_text_to_send, # <-- ВОТ ЧТО НУЖНО БЫЛО ИСПОЛЬЗОВАТЬ
+            parse_mode="MarkdownV2",
+            reply_markup=None # Убираем кнопки, так как заказ завершен
+        )
 
         order_cache.pop(user_id, None) 
         await state.clear()

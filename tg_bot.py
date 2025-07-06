@@ -5,12 +5,14 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand 
 from config import TELEGRAM_TOKEN
 
+
 # Импортируем функции для работы с пулом базы данных
-from db_operations.db import init_db_pool, close_db_pool 
+from db_operations import init_db_pool, close_db_pool, get_employee_id
 
 # Импортируем все роутеры из общего списка
 from handlers import order_routers
 from handlers.reports import order_confirmation_report
+from handlers.reports import my_orders_report
 
 logging.basicConfig(
     level=logging.INFO,
