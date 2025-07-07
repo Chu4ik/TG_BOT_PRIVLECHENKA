@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import date
+from datetime import date, datetime # Добавляем datetime для сегодняшней даты
 from decimal import Decimal
 from typing import Optional, List, Dict
 
@@ -17,7 +17,9 @@ from db_operations.report_payment_operations import ( # <-- Убедитесь, 
     confirm_payment_in_db,
     update_partial_payment_in_db,
     reverse_payment_in_db,
-    UnpaidInvoice # Новый namedtuple
+    get_today_paid_invoices, # <--- НОВАЯ ФУНКЦИЯ
+    UnpaidInvoice,
+    TodayPaidInvoice # <--- НОВЫЙ NAMEDTUPLE
 )
 from states.order import OrderFSM # Убедитесь, что у вас есть этот FSM
 
@@ -47,7 +49,7 @@ def build_unpaid_invoices_keyboard(invoices: List[UnpaidInvoice]) -> InlineKeybo
         else:
             date_str_formatted = "Н/Д"
 
-        button_text = f"{invoice.order_id}_{date_str_formatted} {invoice.client_name} {invoice.outstanding_balance:.2f}₴" # <--- ИЗМЕНЕНО
+        button_text = f"{invoice.order_id}_{date_str_formatted} {invoice.client_name} {invoice.outstanding_balance:.2f}₴"
         buttons.append([
             InlineKeyboardButton(
                 text=escape_markdown_v2(button_text),
@@ -105,7 +107,7 @@ def build_invoice_details_keyboard(order_id: int) -> InlineKeyboardMarkup:
     Строит клавиатуру для детального просмотра накладной с опциями оплаты.
     """
     buttons = [
-        [InlineKeyboardButton(text="✅ Оплачено полностью", callback_data=f"confirm_payment_{order_id}")], # <--- ИСПРАВЛЕНО
+        [InlineKeyboardButton(text="✅ Оплачено полностью", callback_data=f"confirm_payment_{order_id}")],
         [InlineKeyboardButton(text="✍️ Частичная оплата", callback_data=f"partial_payment_{order_id}")],
         [InlineKeyboardButton(text="↩️ Отменить оплату", callback_data=f"reverse_payment_{order_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="back_to_unpaid_list")]
@@ -134,14 +136,13 @@ async def show_client_payments_report(callback_or_message, state: FSMContext, db
 
     if message_object is None:
         logger.error("Не удалось получить объект сообщения из 'callback_or_message'.")
-        # Fallback for error handling
         if is_callback and callback_or_message.message:
             await callback_or_message.message.answer(escape_markdown_v2("Произошла ошибка при отображении отчета. Пожалуйста, попробуйте еще раз."), parse_mode="MarkdownV2")
         elif isinstance(callback_or_message, Message):
             await callback_or_message.answer(escape_markdown_v2("Произошла ошибка при отображении отчета. Пожалуйста, попробуйте еще раз."), parse_mode="MarkdownV2")
         return
 
-    await state.clear() # Очищаем текущее состояние, если вдруг было какое-то активное
+    await state.clear()
     
     invoices = await get_unpaid_invoices(db_pool)
 
@@ -159,7 +160,7 @@ async def show_client_payments_report(callback_or_message, state: FSMContext, db
             await message_object.answer(report_text, parse_mode="MarkdownV2")
         return
 
-    header_text = escape_markdown_v2("Список неоплаченных накладных:") # <--- Заголовок
+    header_text = escape_markdown_v2("Список неоплаченных накладных:")
 
     if is_callback:
         try:
@@ -173,13 +174,51 @@ async def show_client_payments_report(callback_or_message, state: FSMContext, db
     await state.set_state(OrderFSM.viewing_unpaid_invoices_list)
 
 
+@router.message(Command("financial_report_today"))
+async def show_financial_report_today(message: Message, db_pool):
+    """
+    Показывает финансовый отчет за сегодня: все оплаченные накладные и общая сумма.
+    """
+    today = date.today()
+    today_str = today.strftime('%d.%m.%Y')
+    
+    paid_invoices = await get_today_paid_invoices(db_pool)
+    
+    report_parts = []
+    report_parts.append(f"📊 *Финансовый отчет за {escape_markdown_v2(today_str)}:*\n\n")
+    
+    total_paid_amount = Decimal('0.00')
+
+    if not paid_invoices:
+        report_parts.append(escape_markdown_v2("За сегодня нет подтвержденных оплат по накладным."))
+    else:
+        for i, invoice in enumerate(paid_invoices):
+            # Проверяем, что actual_payment_date не None перед форматированием
+            payment_date_str = (
+                invoice.actual_payment_date.strftime('%Y-%m-%d %H:%M') # <--- ИЗМЕНЕНО: Формат с временем
+                if invoice.actual_payment_date
+                else "Не указана"
+            )
+            report_parts.append(
+                f"*{i+1}\\. Накладная №{escape_markdown_v2(invoice.invoice_number)}*\n"
+                f"   Клиент: {escape_markdown_v2(invoice.client_name)}\n"
+                f"   Сумма оплаты: `{invoice.amount_paid:.2f} ₴`\n"
+                f"   Дата оплаты: `{payment_date_str}`\n" # <--- ИЗМЕНЕНО: Используем payment_date_str
+                f"{escape_markdown_v2('----------------------------------')}\n"
+            )
+            total_paid_amount += invoice.amount_paid
+        
+        report_parts.append(f"*ИТОГО ОПЛАЧЕНО ЗА СЕГОДНЯ: `{total_paid_amount:.2f} ₴`*")
+
+    final_report_text = "".join(report_parts)
+    
+    await message.answer(final_report_text, parse_mode="MarkdownV2")
+
+
 @router.callback_query(F.data.startswith("view_invoice_details_"), StateFilter(OrderFSM.viewing_unpaid_invoices_list))
 async def view_invoice_details(callback: CallbackQuery, state: FSMContext, db_pool):
     order_id = int(callback.data.split("view_invoice_details_")[1])
     
-    # Получаем детали только для этой накладной
-    # Придется написать новую функцию в db_operations или использовать get_unpaid_invoices и фильтровать.
-    # Проще всего получить одну запись, как это делалось для OrderDetail
     conn = None
     invoice = None
     try:
@@ -232,8 +271,7 @@ async def handle_confirm_payment(callback: CallbackQuery, state: FSMContext, db_
     success = await confirm_payment_in_db(db_pool, order_id)
     if success:
         await callback.answer("✅ Оплата подтверждена!", show_alert=True)
-        # Обновляем сообщение или возвращаемся к списку
-        await show_client_payments_report(callback.message, state, db_pool) # Обновляем список отчета
+        await show_client_payments_report(callback.message, state, db_pool)
     else:
         await callback.answer("❌ Ошибка подтверждения оплаты.", show_alert=True)
     await callback.answer()
@@ -270,11 +308,11 @@ async def process_partial_payment_amount(message: Message, state: FSMContext, db
     success = await update_partial_payment_in_db(db_pool, order_id, partial_amount)
     if success:
         await message.answer(escape_markdown_v2(f"✅ Частичная оплата в размере `{partial_amount:.2f}` грн для накладной #{order_id} обновлена."), parse_mode="MarkdownV2")
-        await show_client_payments_report(message, state, db_pool) # Обновляем список отчета
+        await show_client_payments_report(message, state, db_pool)
     else:
         await message.answer(escape_markdown_v2("❌ Ошибка при обновлении частичной оплаты."), parse_mode="MarkdownV2")
-        await state.clear() # В случае ошибки лучше сбросить состояние
-    await state.clear() # Сбрасываем состояние после обработки ввода
+        await state.clear()
+    await state.clear()
 
 @router.callback_query(F.data.startswith("reverse_payment_"), StateFilter(OrderFSM.viewing_unpaid_invoices_list))
 async def handle_reverse_payment(callback: CallbackQuery, state: FSMContext, db_pool):
@@ -283,22 +321,10 @@ async def handle_reverse_payment(callback: CallbackQuery, state: FSMContext, db_
     success = await reverse_payment_in_db(db_pool, order_id)
     if success:
         await callback.answer("↩️ Оплата отменена/сброшена.", show_alert=True)
-        await show_client_payments_report(callback.message, state, db_pool) # Обновляем список отчета
+        await show_client_payments_report(callback.message, state, db_pool)
     else:
         await callback.answer("❌ Ошибка отмены оплаты.", show_alert=True)
     await callback.answer()
-
-# Хендлер для кнопки "Назад к списку"
-@router.callback_query(F.data == "back_to_unpaid_list", StateFilter(OrderFSM.viewing_unpaid_invoices_list))
-async def back_to_unpaid_list_handler(callback: CallbackQuery, state: FSMContext, db_pool):
-    await show_client_payments_report(callback.message, state, db_pool)
-    await callback.answer()
-
-# Хендлер для кнопки "Обновить список"
-@router.callback_query(F.data == "refresh_unpaid_invoices", StateFilter(OrderFSM.viewing_unpaid_invoices_list))
-async def refresh_unpaid_invoices_handler(callback: CallbackQuery, state: FSMContext, db_pool):
-    await show_client_payments_report(callback.message, state, db_pool)
-    await callback.answer("Список обновлен!", show_alert=False)
 
 # Хендлер для кнопки "Назад к главному меню" (если будет такая кнопка)
 @router.callback_query(F.data == "back_to_main_menu")

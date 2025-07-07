@@ -48,8 +48,10 @@ async def set_main_menu_commands(bot: Bot):
         BotCommand(command="/new_order", description="Создать новый заказ"),
         BotCommand(command="/my_orders", description="Посмотреть мои заказы"),
         BotCommand(command="/show_unconfirmed_orders", description="Показать draft заказы"),
-        BotCommand(command="/payments", description="Оплаты клиентов")
-        # Добавьте другие команды, если они у вас есть
+        BotCommand(command="/payments", description="💰 Оплаты клиентов"),
+        BotCommand(command="/financial_report_today", description="📊 Отчет об оплатах за сегодня"),
+        BotCommand(command="/incoming_deliveries_today", description="📦 Поступления товара за сегодня"),
+        BotCommand(command="/supplier_payments_today", description="💸 Оплаты поставщикам за сегодня")
     ]
     await bot.set_my_commands(commands)
     logging.info("Основные команды меню установлены.")

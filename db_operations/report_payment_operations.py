@@ -1,4 +1,5 @@
 # db_operations/report_payment_operations.py
+
 import asyncpg
 import logging
 from typing import Optional, List, Dict
@@ -7,8 +8,6 @@ from collections import namedtuple
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
-
-# ... (существующие namedtuple: UnconfirmedOrder, OrderDetail) ...
 
 # НОВЫЙ namedtuple для отображения неоплаченных накладных
 UnpaidInvoice = namedtuple(
@@ -23,6 +22,19 @@ UnpaidInvoice = namedtuple(
         "outstanding_balance", # Рассчитанное поле
         "payment_status",
         "due_date"
+    ]
+)
+
+# НОВЫЙ namedtuple для отображения оплаченных накладных сегодня
+TodayPaidInvoice = namedtuple(
+    "TodayPaidInvoice",
+    [
+        "order_id",
+        "invoice_number",
+        "client_name",
+        "total_amount",
+        "amount_paid",
+        "actual_payment_date" # <--- ИЗМЕНЕНО: Используем actual_payment_date
     ]
 )
 
@@ -54,7 +66,7 @@ async def get_unpaid_invoices(pool) -> List[UnpaidInvoice]:
             o.status = 'confirmed'
             AND o.payment_status IN ('unpaid', 'partially_paid', 'overdue')
         ORDER BY
-            o.confirmation_date ASC, o.order_id ASC; -- <--- ИЗМЕНЕНО: Добавлена сортировка по order_id
+            o.confirmation_date ASC, o.order_id ASC;
         """
         records = await conn.fetch(query)
         return [UnpaidInvoice(**r) for r in records]
@@ -70,28 +82,31 @@ async def get_unpaid_invoices(pool) -> List[UnpaidInvoice]:
 
 async def confirm_payment_in_db(pool, order_id: int) -> bool:
     """
-    Подтверждает полную оплату для накладной, обновляя amount_paid и payment_status.
+    Подтверждает полную оплату для накладной, обновляя amount_paid, payment_status и actual_payment_date.
     """
     conn = None
     try:
         conn = await pool.acquire()
-        # Сначала получаем total_amount, чтобы установить amount_paid равным ему
         total_amount_record = await conn.fetchrow("SELECT total_amount FROM orders WHERE order_id = $1", order_id)
         if not total_amount_record:
             logger.warning(f"Накладная #{order_id} не найдена для подтверждения оплаты.")
             return False
 
         total_amount = total_amount_record['total_amount']
+        
+        # Обновляем actual_payment_date на текущее время
+        current_datetime = datetime.now() # <--- НОВОЕ: Текущая дата и время оплаты
 
         result = await conn.execute("""
             UPDATE orders
             SET payment_status = 'paid',
-                amount_paid = $1 -- Устанавливаем полную сумму оплаты
-            WHERE order_id = $2 AND status = 'confirmed';
-        """, total_amount, order_id)
+                amount_paid = $1,
+                actual_payment_date = $2 -- <--- НОВОЕ: Обновляем actual_payment_date
+            WHERE order_id = $3 AND status = 'confirmed';
+        """, total_amount, current_datetime, order_id) # <--- НОВОЕ: Передаем current_datetime
 
         if result == 'UPDATE 1':
-            logger.info(f"Оплата по накладной #{order_id} полностью подтверждена.")
+            logger.info(f"Оплата по накладной #{order_id} полностью подтверждена. Дата оплаты: {current_datetime}")
             return True
         else:
             logger.warning(f"Оплата по накладной #{order_id} не была подтверждена (статус не 'confirmed' или не найдена).")
@@ -108,12 +123,11 @@ async def confirm_payment_in_db(pool, order_id: int) -> bool:
 
 async def update_partial_payment_in_db(pool, order_id: int, new_amount_paid: Decimal) -> bool:
     """
-    Обновляет частичную оплату для накладной, корректируя amount_paid и payment_status.
+    Обновляет частичную оплату для накладной, корректируя amount_paid, payment_status и actual_payment_date.
     """
     conn = None
     try:
         conn = await pool.acquire()
-        # Получаем текущие данные, чтобы убедиться, что new_amount_paid не превышает total_amount
         current_data = await conn.fetchrow("SELECT total_amount, amount_paid FROM orders WHERE order_id = $1", order_id)
         if not current_data:
             logger.warning(f"Накладная #{order_id} не найдена для частичной оплаты.")
@@ -126,33 +140,30 @@ async def update_partial_payment_in_db(pool, order_id: int, new_amount_paid: Dec
             logger.warning(f"Попытка установить отрицательную сумму оплаты для накладной #{order_id}.")
             return False
 
-        # Обновляем amount_paid. Если new_amount_paid == total_amount, устанавливаем 'paid'.
-        # Иначе, если new_amount_paid > 0 и < total_amount, устанавливаем 'partially_paid'.
-        # Если new_amount_paid == 0, устанавливаем 'unpaid'.
         new_payment_status = 'unpaid'
+        current_datetime = None # <--- НОВОЕ: Инициализируем None
         if new_amount_paid == total_amount:
             new_payment_status = 'paid'
+            current_datetime = datetime.now() # <--- НОВОЕ: Устанавливаем дату оплаты при полной оплате
         elif new_amount_paid > 0 and new_amount_paid < total_amount:
             new_payment_status = 'partially_paid'
+            current_datetime = datetime.now() # <--- НОВОЕ: Устанавливаем дату оплаты при частичной оплате
         elif new_amount_paid > total_amount:
             logger.warning(f"Попытка оплатить больше, чем total_amount для накладной #{order_id}.")
-            # Можно оставить статус 'paid' или 'partially_paid' в зависимости от логики
-            # Или просто не позволять превышать total_amount
-            # Пока оставим так, чтобы кассир мог "переплатить" при необходимости, но это редкость.
-            # Лучше обрезать до total_amount или требовать точного ввода.
-            new_amount_paid = total_amount # Можно принудительно установить полную оплату если ввели больше
+            new_amount_paid = total_amount
             new_payment_status = 'paid'
-
+            current_datetime = datetime.now() # <--- НОВОЕ: Устанавливаем дату оплаты при "переплате"
 
         result = await conn.execute("""
             UPDATE orders
             SET payment_status = $1,
-                amount_paid = $2
-            WHERE order_id = $3 AND status = 'confirmed';
-        """, new_payment_status, new_amount_paid, order_id)
+                amount_paid = $2,
+                actual_payment_date = $3 -- <--- НОВОЕ: Обновляем actual_payment_date
+            WHERE order_id = $4 AND status = 'confirmed';
+        """, new_payment_status, new_amount_paid, current_datetime, order_id) # <--- НОВОЕ: Передаем current_datetime
 
         if result == 'UPDATE 1':
-            logger.info(f"Частичная оплата по накладной #{order_id} обновлена на {new_amount_paid}. Статус: {new_payment_status}")
+            logger.info(f"Частичная оплата по накладной #{order_id} обновлена на {new_amount_paid}. Статус: {new_payment_status}. Дата оплаты: {current_datetime}")
             return True
         else:
             logger.warning(f"Частичная оплата по накладной #{order_id} не была обновлена (статус не 'confirmed' или не найдена).")
@@ -169,7 +180,7 @@ async def update_partial_payment_in_db(pool, order_id: int, new_amount_paid: Dec
 
 async def reverse_payment_in_db(pool, order_id: int) -> bool:
     """
-    Отменяет оплату (полную или частичную), сбрасывая amount_paid и payment_status на 'unpaid'.
+    Отменяет оплату (полную или частичную), сбрасывая amount_paid, payment_status на 'unpaid' и actual_payment_date на NULL.
     """
     conn = None
     try:
@@ -177,7 +188,8 @@ async def reverse_payment_in_db(pool, order_id: int) -> bool:
         result = await conn.execute("""
             UPDATE orders
             SET payment_status = 'unpaid',
-                amount_paid = 0.00
+                amount_paid = 0.00,
+                actual_payment_date = NULL -- <--- НОВОЕ: Сбрасываем actual_payment_date
             WHERE order_id = $1 AND status = 'confirmed';
         """, order_id)
 
@@ -197,4 +209,42 @@ async def reverse_payment_in_db(pool, order_id: int) -> bool:
         if conn:
             await pool.release(conn)
 
-# ... (остальные существующие функции) ...
+async def get_today_paid_invoices(pool) -> List[TodayPaidInvoice]:
+    """
+    Получает список накладных, которые были полностью оплачены сегодня.
+    """
+    conn = None
+    try:
+        conn = await pool.acquire()
+        today = date.today() # Получаем сегодняшнюю дату
+
+        query = """
+        SELECT
+            o.order_id,
+            o.invoice_number,
+            c.name AS client_name,
+            o.total_amount,
+            o.amount_paid,
+            o.actual_payment_date AS actual_payment_date -- <--- ИЗМЕНЕНО: Выбираем actual_payment_date
+        FROM
+            orders o
+        JOIN
+            clients c ON o.client_id = c.client_id
+        WHERE
+            o.payment_status = 'paid'
+            AND o.actual_payment_date::date = $1 -- <--- ИЗМЕНЕНО: Фильтруем по actual_payment_date
+        ORDER BY
+            o.actual_payment_date ASC, o.order_id ASC; -- <--- ИЗМЕНЕНО: Сортируем по actual_payment_date
+        """
+        records = await conn.fetch(query, today)
+        return [TodayPaidInvoice(**r) for r in records]
+    except asyncpg.exceptions.PostgresError as e:
+        logger.error(f"Ошибка БД при получении списка сегодняшних оплат: {e}", exc_info=True)
+        return []
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при получении списка сегодняшних оплат: {e}", exc_info=True)
+        return []
+    finally:
+        if conn:
+            await pool.release(conn)
+

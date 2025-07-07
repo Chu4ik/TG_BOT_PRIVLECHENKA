@@ -6,6 +6,7 @@ from .main_menu import router as main_menu_router
 from .reports.order_confirmation_report import router as order_confirmation_report_router 
 from .reports.my_orders_report import router as my_orders_report_router
 from .reports.client_payments_report import router as client_payments_report_router
+from .reports.supplier_reports import router as supplier_reports_router
 
 # Собираем все router-ы в список
 order_routers = [
@@ -16,5 +17,6 @@ order_routers = [
     main_menu_router,
     order_confirmation_report_router, 
     my_orders_report_router,
-    client_payments_report_router
+    client_payments_report_router,
+    supplier_reports_router
 ]
