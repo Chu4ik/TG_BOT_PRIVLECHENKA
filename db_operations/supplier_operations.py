@@ -1,113 +1,101 @@
-# db_operations/supplier_operations.py
+# handlers/reports/supplier_reports.py
 
-import asyncpg
 import logging
-from typing import List, Optional
+import re
 from datetime import date, datetime
-from collections import namedtuple
 from decimal import Decimal
+from typing import List
 
+from aiogram import Router, F
+from aiogram.types import Message
+from aiogram.filters import Command
+
+# Импортируем функции из нового файла операций с поставщиками
+from db_operations.supplier_operations import (
+    get_incoming_deliveries_for_date,
+    get_supplier_payments_for_date,
+    IncomingDeliveryReportItem,
+    SupplierPaymentReportItem
+)
+
+router = Router()
 logger = logging.getLogger(__name__)
 
-# Namedtuple для отчета о поступлениях товара
-IncomingDeliveryReportItem = namedtuple(
-    "IncomingDeliveryReportItem",
-    [
-        "delivery_id",
-        "delivery_date",
-        "supplier_name",
-        "product_name",
-        "quantity",
-        "unit_cost",
-        "total_cost"
-    ]
-)
+# Убедитесь, что эта функция определена или доступна глобально в вашем проекте
+def escape_markdown_v2(text: str) -> str:
+    """Escapes special characters for MarkdownV2."""
+    # ИСПРАВЛЕНО: Добавлен обратный слэш '\' в список специальных символов
+    special_chars = r'_*[]()~`>#+-=|{}.!\'\\'
+    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
-# Namedtuple для отчета об оплатах поставщикам
-SupplierPaymentReportItem = namedtuple(
-    "SupplierPaymentReportItem",
-    [
-        "payment_id",
-        "payment_date",
-        "supplier_name",
-        "delivery_id", # Может быть NULL, если оплата не привязана к конкретной поставке
-        "amount",
-        "payment_method"
-    ]
-)
+@router.message(Command("incoming_deliveries_today"))
+async def show_incoming_deliveries_report(message: Message, db_pool):
+    """
+    Показывает отчет о поступлениях товара от поставщиков за сегодня.
+    """
+    today = date.today()
+    today_str = today.strftime('%d.%m.%Y')
+    
+    deliveries = await get_incoming_deliveries_for_date(db_pool, today)
+    
+    report_parts = []
+    report_parts.append(f"📦 *Отчет о поступлениях товара за {escape_markdown_v2(today_str)}:*\n\n")
+    
+    total_cost_of_deliveries = Decimal('0.00')
 
-async def get_incoming_deliveries_for_date(pool, report_date: date) -> List[IncomingDeliveryReportItem]:
-    """
-    Получает список поступлений товара за указанную дату.
-    """
-    conn = None
-    try:
-        conn = await pool.acquire()
-        query = """
-        SELECT
-            id.delivery_id,
-            id.delivery_date,
-            s.name AS supplier_name,
-            p.name AS product_name,
-            id.quantity,
-            id.unit_cost,
-            id.total_cost
-        FROM
-            incoming_deliveries id
-        JOIN
-            suppliers s ON id.supplier_id = s.supplier_id
-        JOIN
-            products p ON id.product_id = p.product_id
-        WHERE
-            id.delivery_date = $1
-        ORDER BY
-            id.delivery_date ASC, s.name ASC, p.name ASC;
-        """
-        records = await conn.fetch(query, report_date)
-        return [IncomingDeliveryReportItem(**r) for r in records]
-    except asyncpg.exceptions.PostgresError as e:
-        logger.error(f"Ошибка БД при получении поступлений за {report_date}: {e}", exc_info=True)
-        return []
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка при получении поступлений за {report_date}: {e}", exc_info=True)
-        return []
-    finally:
-        if conn:
-            await pool.release(conn)
+    if not deliveries:
+        report_parts.append(escape_markdown_v2("За сегодня нет поступлений товара."))
+    else:
+        for i, item in enumerate(deliveries):
+            report_parts.append(
+                f"*{i+1}\\. Поступление ID {item.delivery_id}*\n"
+                f"   Поставщик: {escape_markdown_v2(item.supplier_name)}\n"
+                f"   Товар: {escape_markdown_v2(item.product_name)}\n"
+                f"   Кол-во: `{item.quantity}` ед\\. по `{item.unit_cost:.2f} ₴`\n"
+                f"   Общая стоимость: `{item.total_cost:.2f} ₴`\n"
+                f"{escape_markdown_v2('----------------------------------')}\n"
+            )
+            total_cost_of_deliveries += item.total_cost
+        
+        report_parts.append(f"*ИТОГО ПОСТУПЛЕНИЙ ЗА СЕГОДНЯ: `{total_cost_of_deliveries:.2f} ₴`*")
+
+    final_report_text = "".join(report_parts)
+    
+    await message.answer(final_report_text, parse_mode="MarkdownV2")
 
 
-async def get_supplier_payments_for_date(pool, report_date: date) -> List[SupplierPaymentReportItem]:
+@router.message(Command("supplier_payments_today"))
+async def show_supplier_payments_report(message: Message, db_pool):
     """
-    Получает список оплат поставщикам за указанную дату.
+    Показывает отчет об оплатах поставщикам за сегодня.
     """
-    conn = None
-    try:
-        conn = await pool.acquire()
-        query = """
-        SELECT
-            sp.payment_id,
-            sp.payment_date,
-            s.name AS supplier_name,
-            sp.delivery_id,
-            sp.amount,
-            sp.payment_method
-        FROM
-            supplier_payments sp
-        JOIN
-            suppliers s ON sp.supplier_id = s.supplier_id
-        WHERE
-            sp.payment_date = $1
-        ORDER BY
-            sp.payment_date ASC, s.name ASC, sp.payment_id ASC;
-        """
-        records = await conn.fetch(query, report_date)
-        return [SupplierPaymentReportItem(**r) for r in records]
-    except asyncpg.exceptions.PostgresError as e:
-        logger.error(f"Ошибка БД при получении оплат поставщикам за {report_date}: {e}", exc_info=True)
-        return []
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка при получении оплат поставщикам за {report_date}: {e}", exc_info=True)
-        return []
-    finally:
-        if conn:
-            await pool.release(conn)
+    today = date.today()
+    today_str = today.strftime('%d.%m.%Y')
+    
+    payments = await get_supplier_payments_for_date(db_pool, today)
+    
+    report_parts = []
+    report_parts.append(f"💸 *Отчет об оплатах поставщикам за {escape_markdown_v2(today_str)}:*\n\n")
+    
+    total_paid_amount = Decimal('0.00')
+
+    if not payments:
+        report_parts.append(escape_markdown_v2("За сегодня нет оплат поставщикам."))
+    else:
+        for i, payment in enumerate(payments):
+            delivery_info = f" (Поставка ID: `{payment.delivery_id}`)" if payment.delivery_id else ""
+            report_parts.append(
+                f"*{i+1}\\. Оплата ID {payment.payment_id}*\n"
+                f"   Поставщик: {escape_markdown_v2(payment.supplier_name)}\n"
+                f"   Сумма: `{payment.amount:.2f} ₴`\n"
+                f"   Метод: {escape_markdown_v2(payment.payment_method)}{escape_markdown_v2(delivery_info)}\n"
+                f"   Дата оплаты: `{payment.payment_date.strftime('%Y-%m-%d')}`\n"
+                f"{escape_markdown_v2('----------------------------------')}\n"
+            )
+            total_paid_amount += payment.amount
+        
+        report_parts.append(f"*ИТОГО ОПЛАЧЕНО ПОСТАВЩИКАМ ЗА СЕГОДНЯ: `{total_paid_amount:.2f} ₴`*")
+
+    final_report_text = "".join(report_parts)
+    
+    await message.answer(final_report_text, parse_mode="MarkdownV2")

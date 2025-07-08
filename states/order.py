@@ -11,11 +11,10 @@ class OrderFSM(StatesGroup):
     selecting_product_category = State() # Выбор категории товара (если есть)
     selecting_product = State()          # Выбор товара из общего списка
     entering_quantity = State()          # Ввод количества выбранного товара
-    choosing_next_action = State()       # <-- ДОБАВЛЕНО ЭТО СОСТОЯНИЕ: Выбор следующего действия (добавить еще товар / завершить заказ)
+    choosing_next_action = State()       # Выбор следующего действия (добавить еще товар / завершить заказ)
 
     # Состояния для редактирования корзины
     editing_order = State()              # Основное меню корзины и действий с ней
-    # editing_item = State()             # Это состояние у нас теперь более детально разбито ниже
     change_delivery_date = State()       # Изменение даты доставки
     
     # Новые состояния для редактирования строки (корректные)
@@ -26,6 +25,22 @@ class OrderFSM(StatesGroup):
 
     # Дополнительные состояния (если есть, например, для подтверждения заказа)
     confirming_order = State()           # Состояние перед окончательным подтверждением заказа
-    # add_new_address = State()          # Пример: если будет функционал добавления нового адреса
     viewing_unpaid_invoices_list = State()
     entering_partial_payment_amount = State()
+
+    # --- НОВЫЕ СОСТОЯНИЯ ДЛЯ ДОБАВЛЕНИЯ ПОСТУПЛЕНИЯ ТОВАРА (МНОГОПОЗИЦИОННОЕ) ---
+    waiting_for_delivery_date = State()          # Ввод даты поступления
+    waiting_for_supplier_selection = State()     # Выбор поставщика
+    
+    adding_delivery_items = State()              # Меню для добавления/редактирования позиций поступления
+    
+    waiting_for_delivery_product_selection = State() # Выбор продукта для поступления
+    waiting_for_delivery_quantity = State()      # Ввод количества для поступления
+    waiting_for_delivery_unit_cost = State()     # Ввод стоимости за единицу для поступления
+
+    editing_delivery_item_selection = State()    # Выбор позиции для редактирования
+    editing_delivery_item_action = State()       # Выбор действия (изменить кол-во/цену)
+    entering_new_delivery_quantity = State()     # Ввод нового количества для позиции
+    entering_new_delivery_unit_cost = State()    # Ввод новой цены для позиции
+    confirm_delivery_data = State()              # <--- УБЕДИТЕСЬ, ЧТО ЭТО СОСТОЯНИЕ ПРИСУТСТВУЕТ И НАПИСАНО ПРАВИЛЬНО
+

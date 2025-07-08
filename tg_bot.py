@@ -44,14 +44,16 @@ async def set_main_menu_commands(bot: Bot):
     Устанавливает команды для бокового меню (меню-гамбургера).
     """
     commands = [
-        BotCommand(command="/start", description="Начать работу с ботом"),
-        BotCommand(command="/new_order", description="Создать новый заказ"),
-        BotCommand(command="/my_orders", description="Посмотреть мои заказы"),
-        BotCommand(command="/show_unconfirmed_orders", description="Показать draft заказы"),
+        BotCommand(command="/start", description="▶️ Начать работу с ботом"), # Добавлена иконка
+        BotCommand(command="/new_order", description="➕ Создать новый заказ"), # Добавлена иконка
+        BotCommand(command="/my_orders", description="📄 Посмотреть мои заказы"), # Добавлена иконка
+        BotCommand(command="/show_unconfirmed_orders", description="📝 Показать draft заказы"), # Добавлена иконка
         BotCommand(command="/payments", description="💰 Оплаты клиентов"),
         BotCommand(command="/financial_report_today", description="📊 Отчет об оплатах за сегодня"),
         BotCommand(command="/incoming_deliveries_today", description="📦 Поступления товара за сегодня"),
-        BotCommand(command="/supplier_payments_today", description="💸 Оплаты поставщикам за сегодня")
+        BotCommand(command="/supplier_payments_today", description="💸 Оплаты поставщикам за сегодня"),
+        BotCommand(command="/add_delivery", description="🚚 Добавить поступление товара"), # Добавлена иконка
+        BotCommand(command="/inventory_report", description="📈 Отчет об остатках товара") # Добавлена иконка
     ]
     await bot.set_my_commands(commands)
     logging.info("Основные команды меню установлены.")

@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 # Убедитесь, что эта функция определена или доступна глобально в вашем проекте
 def escape_markdown_v2(text: str) -> str:
     """Escapes special characters for MarkdownV2."""
-    special_chars = r'_*[]()~`>#+-=|{}.!'
+    # ИСПРАВЛЕНО: Добавлен обратный слэш '\' в список специальных символов
+    special_chars = r'_*[]()~`>#+-=|{}.!\'\\'
     return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
 # --- Вспомогательные функции для клавиатуры и форматирования ---
@@ -174,7 +175,7 @@ async def show_client_payments_report(callback_or_message, state: FSMContext, db
     await state.set_state(OrderFSM.viewing_unpaid_invoices_list)
 
 
-@router.message(Command("financial_report_today"))
+@router.message(Command("financial_report_today")) # <--- НОВЫЙ ХЕНДЛЕР
 async def show_financial_report_today(message: Message, db_pool):
     """
     Показывает финансовый отчет за сегодня: все оплаченные накладные и общая сумма.
@@ -193,17 +194,11 @@ async def show_financial_report_today(message: Message, db_pool):
         report_parts.append(escape_markdown_v2("За сегодня нет подтвержденных оплат по накладным."))
     else:
         for i, invoice in enumerate(paid_invoices):
-            # Проверяем, что actual_payment_date не None перед форматированием
-            payment_date_str = (
-                invoice.actual_payment_date.strftime('%Y-%m-%d %H:%M') # <--- ИЗМЕНЕНО: Формат с временем
-                if invoice.actual_payment_date
-                else "Не указана"
-            )
             report_parts.append(
                 f"*{i+1}\\. Накладная №{escape_markdown_v2(invoice.invoice_number)}*\n"
                 f"   Клиент: {escape_markdown_v2(invoice.client_name)}\n"
                 f"   Сумма оплаты: `{invoice.amount_paid:.2f} ₴`\n"
-                f"   Дата оплаты: `{payment_date_str}`\n" # <--- ИЗМЕНЕНО: Используем payment_date_str
+                f"   Дата оплаты: `{invoice.actual_payment_date.strftime('%Y-%m-%d')}`\n" # confirmation_date
                 f"{escape_markdown_v2('----------------------------------')}\n"
             )
             total_paid_amount += invoice.amount_paid
@@ -238,6 +233,8 @@ async def view_invoice_details(callback: CallbackQuery, state: FSMContext, db_po
                 orders o
             JOIN
                 clients c ON o.client_id = c.client_id
+            JOIN
+                addresses a ON o.address_id = a.address_id
             WHERE
                 o.order_id = $1;
         """, order_id)

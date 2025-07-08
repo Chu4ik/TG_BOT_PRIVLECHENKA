@@ -6,6 +6,7 @@ from collections import namedtuple
 import logging
 from typing import Optional, List, Dict
 from decimal import Decimal
+from db_operations.product_operations import update_stock_on_order_confirmation, get_product_current_stock
 
 logger = logging.getLogger(__name__)
 
@@ -172,47 +173,77 @@ async def get_unconfirmed_order_full_details(pool, order_id: int) -> Optional[Di
             await pool.release(conn)
 
 
-async def confirm_order_in_db(pool, order_id: int):
+async def confirm_order_in_db(pool, order_id: int) -> bool:
     """
     Подтверждает один заказ в БД, устанавливая статус 'confirmed',
     генерируя номер накладной (дата из delivery_date), устанавливая confirmation_date = delivery_date и due_date.
+    Также уменьшает остатки товаров, предварительно проверяя их наличие.
     """
     conn = None
     try:
         conn = await pool.acquire()
 
-        # Сначала получаем delivery_date для этого заказа
+        # Шаг 1: Получаем информацию о заказе и его товарах
         order_info = await conn.fetchrow("SELECT delivery_date FROM orders WHERE order_id = $1 AND status = 'draft';", order_id)
         if not order_info:
             logger.warning(f"Заказ #{order_id} не найден или уже не в статусе 'draft' для подтверждения.")
             return False
 
-        delivery_date_for_invoice = order_info['delivery_date'] # <--- ПОЛУЧАЕМ ДАТУ ДОСТАВКИ
+        order_items = await conn.fetch("""
+            SELECT product_id, quantity FROM order_lines WHERE order_id = $1;
+        """, order_id)
 
-        # Формируем invoice_number, используя delivery_date
-        invoice_number = f"INV-{delivery_date_for_invoice.strftime('%Y%m%d')}-{order_id}" # <--- ИЗМЕНЕНО
-        
-        # confirmation_date теперь равна delivery_date
-        confirmation_date_val = delivery_date_for_invoice 
-        
-        # Рассчитываем due_date: например, 7 дней после delivery_date (которая теперь confirmation_date)
-        due_date_calculated = confirmation_date_val + timedelta(days=7) 
-
-        result = await conn.execute("""
-            UPDATE orders
-            SET status = 'confirmed',
-                invoice_number = $1,
-                confirmation_date = $2,
-                due_date = $3
-            WHERE order_id = $4 AND status = 'draft';
-        """, invoice_number, confirmation_date_val, due_date_calculated, order_id)
-        
-        if result == 'UPDATE 1':
-            logger.info(f"Заказ #{order_id} подтвержден, сформирована накладная: {invoice_number}, дата накладной (доставки): {confirmation_date_val}, срок оплаты: {due_date_calculated}")
-            return True
-        else:
-            logger.warning(f"Заказ #{order_id} не был подтвержден (статус не 'draft' или не найден).")
+        if not order_items:
+            logger.warning(f"Заказ #{order_id} не содержит товаров. Невозможно подтвердить.")
             return False
+
+        # Шаг 2: Проверяем наличие достаточного количества товара на складе
+        for item in order_items:
+            product_id = item['product_id']
+            quantity_ordered = item['quantity']
+            current_stock = await get_product_current_stock(pool, product_id) # Получаем текущий остаток
+
+            if current_stock is None:
+                logger.error(f"Продукт ID {product_id} не найден при проверке остатков для заказа #{order_id}.")
+                return False
+            if current_stock < quantity_ordered:
+                logger.warning(f"Недостаточно товара (ID: {product_id}) на складе для заказа #{order_id}. Требуется: {quantity_ordered}, Доступно: {current_stock}.")
+                # Здесь можно отправить сообщение пользователю о недостатке товара
+                return False # Отменяем подтверждение, если товара недостаточно
+
+        # Шаг 3: Если все проверки пройдены, начинаем транзакцию для подтверждения заказа и списания остатков
+        async with conn.transaction():
+            delivery_date_for_invoice = order_info['delivery_date']
+            invoice_number = f"INV-{delivery_date_for_invoice.strftime('%Y%m%d')}-{order_id}"
+            confirmation_date_val = delivery_date_for_invoice
+            due_date_calculated = confirmation_date_val + timedelta(days=7)
+
+            # Обновляем статус заказа
+            result = await conn.execute("""
+                UPDATE orders
+                SET status = 'confirmed',
+                    invoice_number = $1,
+                    confirmation_date = $2,
+                    due_date = $3
+                WHERE order_id = $4 AND status = 'draft';
+            """, invoice_number, confirmation_date_val, due_date_calculated, order_id)
+            
+            if result != 'UPDATE 1':
+                logger.warning(f"Заказ #{order_id} не был подтвержден (статус не 'draft' или не найден) после проверки остатков.")
+                return False
+
+            # Шаг 4: Записываем движения по складу (списание)
+            stock_updated = await update_stock_on_order_confirmation(pool, order_id)
+            if not stock_updated:
+                logger.error(f"Не удалось записать движения расхода для заказа #{order_id}. Откат транзакции.")
+                # Если update_stock_on_order_confirmation возвращает False,
+                # это означает, что произошла внутренняя ошибка при записи движений.
+                # Транзакция будет автоматически откачена при выходе из async with conn.transaction()
+                return False 
+        
+        logger.info(f"Заказ #{order_id} подтвержден, сформирована накладная: {invoice_number}, дата накладной (доставки): {confirmation_date_val}, срок оплаты: {due_date_calculated}. Остатки успешно списаны.")
+        return True
+
     except asyncpg.exceptions.PostgresError as e:
         logger.error(f"Ошибка asyncpg при подтверждении заказа #{order_id}: {e}", exc_info=True)
         return False
@@ -222,7 +253,6 @@ async def confirm_order_in_db(pool, order_id: int):
     finally:
         if conn:
             await pool.release(conn)
-
 
 async def cancel_order_in_db(pool, order_id: int):
     # ... (ваш существующий код) ...
@@ -253,32 +283,52 @@ async def cancel_order_in_db(pool, order_id: int):
             await pool.release(conn)
 
 
-async def confirm_all_orders_in_db(pool, order_ids: list[int]):
+async def confirm_all_orders_in_db(pool, order_ids: list[int]) -> bool:
     """
     Массовое подтверждение заказов (используя asyncpg и транзакцию),
     устанавливая confirmation_date = delivery_date и due_date,
     и формируя invoice_number на основе delivery_date.
+    Также уменьшает остатки товаров, предварительно проверяя их наличие.
     """
     conn = None
     try:
         conn = await pool.acquire()
-        async with conn.transaction():
+        async with conn.transaction(): # Одна большая транзакция для всех заказов
             for order_id in order_ids:
-                # Для каждого заказа получаем delivery_date
+                # Шаг 1: Получаем информацию о заказе и его товарах
                 order_info = await conn.fetchrow("SELECT delivery_date FROM orders WHERE order_id = $1 AND status = 'draft';", order_id)
                 if not order_info:
                     logger.warning(f"Заказ #{order_id} не найден или уже не в статусе 'draft' для массового подтверждения. Пропускаем.")
-                    continue 
+                    continue
 
+                order_items = await conn.fetch("""
+                    SELECT product_id, quantity FROM order_lines WHERE order_id = $1;
+                """, order_id)
+
+                if not order_items:
+                    logger.warning(f"Заказ #{order_id} не содержит товаров. Пропускаем подтверждение.")
+                    continue
+
+                # Шаг 2: Проверяем наличие достаточного количества товара на складе для текущего заказа
+                for item in order_items:
+                    product_id = item['product_id']
+                    quantity_ordered = item['quantity']
+                    current_stock = await get_product_current_stock(pool, product_id) # Получаем текущий остаток
+
+                    if current_stock is None:
+                        logger.error(f"Продукт ID {product_id} не найден при проверке остатков для заказа #{order_id}. Откат всей массовой транзакции.")
+                        raise Exception(f"Продукт ID {product_id} не найден.") # Поднимаем исключение для отката
+                    if current_stock < quantity_ordered:
+                        logger.warning(f"Недостаточно товара (ID: {product_id}) на складе для заказа #{order_id}. Требуется: {quantity_ordered}, Доступно: {current_stock}. Откат всей массовой транзакции.")
+                        raise Exception(f"Недостаточно товара (ID: {product_id}) на складе.") # Поднимаем исключение для отката
+
+                # Шаг 3: Обновляем статус заказа
                 delivery_date_for_invoice = order_info['delivery_date']
-
-                # Формируем invoice_number, используя delivery_date
-                invoice_number = f"INV-{delivery_date_for_invoice.strftime('%Y%m%d')}-{order_id}" # <--- ИЗМЕНЕНО
-                
+                invoice_number = f"INV-{delivery_date_for_invoice.strftime('%Y%m%d')}-{order_id}"
                 confirmation_date_val = delivery_date_for_invoice
                 due_date_calculated = confirmation_date_val + timedelta(days=7)
 
-                await conn.execute("""
+                result = await conn.execute("""
                     UPDATE orders
                     SET status = 'confirmed',
                         invoice_number = $1,
@@ -286,14 +336,21 @@ async def confirm_all_orders_in_db(pool, order_ids: list[int]):
                         due_date = $3
                     WHERE order_id = $4 AND status = 'draft';
                 """, invoice_number, confirmation_date_val, due_date_calculated, order_id)
+                
+                if result != 'UPDATE 1':
+                    logger.warning(f"Заказ #{order_id} не был подтвержден (статус не 'draft' или не найден) после проверки остатков. Откат всей массовой транзакции.")
+                    raise Exception(f"Заказ #{order_id} не был подтвержден.")
+
+                # Шаг 4: Записываем движения по складу (списание)
+                stock_updated = await update_stock_on_order_confirmation(pool, order_id)
+                if not stock_updated:
+                    logger.error(f"Не удалось записать движения расхода для заказа #{order_id} в массовой операции. Откат всей массовой транзакции.")
+                    raise Exception(f"Ошибка записи движений по складу для заказа #{order_id}.")
         
-        logger.info(f"Все выбранные заказы ({len(order_ids)}) подтверждены. Даты накладных (доставки) и сроки оплаты установлены.")
+        logger.info(f"Все выбранные заказы ({len(order_ids)}) подтверждены. Даты накладных (доставки) и сроки оплаты установлены. Остатки обновлены.")
         return True
-    except asyncpg.exceptions.PostgresError as e:
-        logger.error(f"Ошибка asyncpg при массовом подтверждении заказов: {e}", exc_info=True)
-        return False
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка при массовом подтверждении заказов: {e}", exc_info=True)
+    except Exception as e: # Ловим общее исключение, чтобы откатить всю транзакцию
+        logger.error(f"Ошибка при массовом подтверждении заказов и обновлении остатков: {e}", exc_info=True)
         return False
     finally:
         if conn:
