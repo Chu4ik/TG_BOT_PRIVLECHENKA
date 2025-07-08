@@ -7,7 +7,7 @@ from decimal import Decimal
 
 # Импортируем функции для работы с пулом базы данных из db_operations
 # Убедитесь, что ваш config.py находится в корне проекта или настройте путь
-from config import DB_HOST, DB_NAME, DB_USER, DB_PASSWORD # ИСПРАВЛЕНО: Импортируем DB_PASSWORD
+from config import DB_HOST, DB_NAME, DB_USER, DB_PASSWORD
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,18 +18,17 @@ logger = logging.getLogger(__name__)
 async def init_db_pool():
     """Инициализирует пул соединений с базой данных."""
     try:
-        # ИСПРАВЛЕНО: Удалены некорректные проверки hasattr(config, ...)
-        if not all([DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]): # ИСПРАВЛЕНО: Проверяем DB_PASSWORD
+        if not all([DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
             missing_vars = []
             if not DB_HOST: missing_vars.append('DB_HOST')
             if not DB_NAME: missing_vars.append('DB_NAME')
             if not DB_USER: missing_vars.append('DB_USER')
-            if not DB_PASSWORD: missing_vars.append('DB_PASSWORD') # ИСПРАВЛЕНО: Проверяем DB_PASSWORD
+            if not DB_PASSWORD: missing_vars.append('DB_PASSWORD')
             raise ValueError(f"Отсутствуют необходимые переменные конфигурации базы данных в config.py: {', '.join(missing_vars)}")
 
         pool = await asyncpg.create_pool(
             user=DB_USER,
-            password=DB_PASSWORD, # ИСПРАВЛЕНО: Используем DB_PASSWORD
+            password=DB_PASSWORD,
             host=DB_HOST,
             database=DB_NAME,
             min_size=1,
@@ -60,13 +59,18 @@ async def synchronize_stock_table(db_pool: asyncpg.Pool):
             logger.info("Таблица 'stock' очищена.")
 
             logger.info("Пересчет остатков на основе 'inventory_movements'...")
-            # Суммируем quantity_change для каждого продукта
-            # Используем COALESCE для обработки продуктов без движений
+            # ИСПРАВЛЕНО: Суммируем quantity_change условно, в зависимости от movement_type
             recalculate_query = """
             INSERT INTO stock (product_id, quantity)
             SELECT
                 p.product_id,
-                COALESCE(SUM(im.quantity_change), 0) AS calculated_quantity
+                COALESCE(
+                    SUM(CASE
+                        WHEN im.movement_type = 'incoming' THEN im.quantity_change
+                        WHEN im.movement_type = 'outgoing' THEN -im.quantity_change -- Вычитаем для исходящих
+                        ELSE 0
+                    END),
+                0) AS calculated_quantity
             FROM
                 products p
             LEFT JOIN

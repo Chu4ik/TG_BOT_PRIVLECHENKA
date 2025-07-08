@@ -60,7 +60,7 @@ async def get_all_product_stock(db_pool: asyncpg.Pool) -> List[ProductStockItem]
         p.product_id,
         p.name,
         p.cost_per_unit, -- Базовая стоимость из таблицы products
-        COALESCE(SUM(s.quantity), 0) AS current_stock,
+        COALESCE(s.quantity, 0) AS current_stock, -- ИСПРАВЛЕНО: Берем напрямую из stock.quantity
         -- Расчет средней стоимости поступления из inventory_movements
         -- Используем im.quantity_change для фильтрации, если это необходимо для AVG
         COALESCE(AVG(im.unit_cost) FILTER (WHERE im.movement_type = 'incoming'), p.cost_per_unit) AS average_movement_cost
@@ -71,13 +71,20 @@ async def get_all_product_stock(db_pool: asyncpg.Pool) -> List[ProductStockItem]
     LEFT JOIN
         inventory_movements im ON p.product_id = im.product_id
     GROUP BY
-        p.product_id, p.name, p.cost_per_unit
+        p.product_id, p.name, p.cost_per_unit, s.quantity -- ИСПРАВЛЕНО: Добавлен s.quantity в GROUP BY
     ORDER BY
         p.name;
     """
     async with db_pool.acquire() as conn:
         try:
             records = await conn.fetch(query)
+            
+            # --- DEBUGGING START ---
+            logger.info("DEBUG: Данные, полученные из БД для отчета об остатках:")
+            for r in records:
+                logger.info(f"  Product ID: {r['product_id']}, Name: {r['name']}, Current Stock: {r['current_stock']}")
+            # --- DEBUGGING END ---
+
             return [ProductStockItem(
                 r['product_id'],
                 r['name'],
@@ -258,7 +265,7 @@ async def record_stock_movement(db_pool: asyncpg.Pool, product_id: int, quantity
                 logger.error("Для входящего движения (incoming) unit_cost должен быть предоставлен.")
                 raise ValueError("unit_cost is required for 'incoming' movement type.")
             
-            # ИСПРАВЛЕНО: Используем quantity_change, source_document_type, source_document_id и description
+            # Используем quantity_change, source_document_type, source_document_id и description
             await conn.execute("""
                 INSERT INTO inventory_movements (product_id, quantity_change, movement_type, movement_date, unit_cost, source_document_type, source_document_id, description)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
