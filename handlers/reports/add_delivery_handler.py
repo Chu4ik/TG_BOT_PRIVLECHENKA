@@ -30,18 +30,27 @@ logger = logging.getLogger(__name__)
 def escape_markdown_v2(text: str) -> str:
     """
     Экранирует все специальные символы для MarkdownV2.
-    Эта функция предназначена для экранирования *любого* текста, который будет вставлен
-    в MarkdownV2 строку и не должен быть интерпретирован как разметка.
+    Эта функция гарантирует, что каждый специальный символ будет правильно экранирован
+    путем построения новой строки, обрабатывая каждый символ по очереди.
     """
     if text is None:
         logger.error("escape_markdown_v2 received NoneType text. Returning empty string.")
-        return "" # Возвращаем пустую строку, чтобы предотвратить TypeError
+        return ""
 
-    # ИСПРАВЛЕНО: Добавлен обратный слэш '\' в список специальных символов
-    # Полный список специальных символов в MarkdownV2, включая обратный слэш
-    # https://core.telegram.org/bots/api#markdownv2-style
-    special_chars = r'_*[]()~`>#+-=|{}.!\'\\'
-    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
+    # Важно: сначала экранируем обратный слэш, чтобы избежать двойного экранирования
+    # уже добавленных обратных слэшей.
+    text = text.replace('\\', '\\\\')
+
+    # Остальные специальные символы MarkdownV2
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+
+    escaped_text_parts = []
+    for char in text:
+        if char in special_chars:
+            escaped_text_parts.append('\\' + char)
+        else:
+            escaped_text_parts.append(char)
+    return "".join(escaped_text_parts)
 
 # --- Вспомогательные функции для клавиатур ---
 
@@ -114,7 +123,8 @@ def build_edit_delivery_item_keyboard(item_index: int) -> InlineKeyboardMarkup:
     """
     buttons = [
         [InlineKeyboardButton(text="✏️ Изменить количество", callback_data=f"edit_delivery_item_qty_{item_index}")],
-        [InlineKeyboardButton(text="💲 Изменить цену за ед.", callback_data=f"edit_delivery_item_cost_{item_index})")],
+        # ИСПРАВЛЕНО: УДАЛЕНА ЛИШНЯЯ СКОБКА в callback_data
+        [InlineKeyboardButton(text="💲 Изменить цену за ед.", callback_data=f"edit_delivery_item_cost_{item_index}")],
         [InlineKeyboardButton(text="⬅️ Назад к позициям", callback_data="back_to_adding_delivery_items")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -179,8 +189,7 @@ def get_delivery_summary_text(data: Dict[str, Any]) -> str:
             # которые не являются частью Markdown-разметки.
             summary_parts.append(
                 f"   *{i+1}\\. {product_name_escaped}*\n" # Экранируем '.' в '1.'
-                f"      Кол\\-во: `{item['quantity']}` ед\\.\n" # Экранируем '-' в 'Кол-во' и '.' в 'ед.'
-                f"      Цена за ед\\.: `{item['unit_cost']:.2f} ₴`\n" # Экранируем '.' в 'ед.'
+                f"      Кол\\-во: `{item['quantity']}` ед\\. по `{item['unit_cost']:.2f} ₴`\n" # Экранируем '-' в 'Кол-во' и '.' в 'ед.'
                 f"      Сумма по позиции: `{item_total:.2f} ₴`\n" # Экранируем '.' в 'ед.'
             )
     
@@ -419,6 +428,7 @@ async def process_new_delivery_quantity(message: Message, state: FSMContext):
             # Эта строка является обычным текстом, содержащим точку, поэтому ее нужно экранировать.
             await message.answer(escape_markdown_v2("Количество должно быть положительным целым числом."), parse_mode="MarkdownV2")
             return
+        await state.update_data(current_quantity=new_quantity) # ИСПРАВЛЕНО: Обновляем current_quantity
         
         data = await state.get_data()
         item_index = data['editing_item_index']
@@ -443,6 +453,9 @@ async def process_new_delivery_quantity(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("edit_delivery_item_cost_"), OrderFSM.editing_delivery_item_action)
 async def start_edit_delivery_unit_cost(callback: CallbackQuery, state: FSMContext):
     """Начинает процесс изменения цены за единицу для позиции поступления."""
+    # Здесь callback.data будет иметь вид "edit_delivery_item_cost_X"
+    # split("_") даст ["edit", "delivery", "item", "cost", "X"]
+    # Так что [4] будет правильным индексом
     item_index = int(callback.data.split("_")[4])
     data = await state.get_data()
     item = data['delivery_items'][item_index]

@@ -50,8 +50,6 @@ async def set_main_menu_commands(bot: Bot):
         BotCommand(command="/show_unconfirmed_orders", description="📝 Показать draft заказы"), # Добавлена иконка
         BotCommand(command="/payments", description="💰 Оплаты клиентов"),
         BotCommand(command="/financial_report_today", description="📊 Отчет об оплатах за сегодня"),
-        BotCommand(command="/incoming_deliveries_today", description="📦 Поступления товара за сегодня"),
-        BotCommand(command="/supplier_payments_today", description="💸 Оплаты поставщикам за сегодня"),
         BotCommand(command="/add_delivery", description="🚚 Добавить поступление товара"), # Добавлена иконка
         BotCommand(command="/inventory_report", description="📈 Отчет об остатках товара") # Добавлена иконка
     ]
