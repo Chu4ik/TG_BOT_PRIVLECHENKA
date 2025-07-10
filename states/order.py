@@ -48,3 +48,42 @@ class OrderFSM(StatesGroup):
     editing_order_selection_admin = State() # Выбор заказа из списка для админа
     editing_order_existing = State()       # Пользователь (админ) редактирует существующий заказ
 
+        # --- НОВЫЕ СОСТОЯНИЯ ДЛЯ КОРРЕКТИРОВОК И ВОЗВРАТОВ ---
+    waiting_for_adjustment_type = State()       # Выбор типа корректировки (возврат, списание, оприходование)
+    waiting_for_adjustment_product = State()    # Выбор продукта для корректировки
+    waiting_for_adjustment_quantity = State()   # Ввод количества для корректировки
+    waiting_for_adjustment_description = State()# Ввод описания/причины
+    confirm_adjustment_data = State()           # Подтверждение данных корректировки
+
+
+    # --- Существующие состояния для корректировок и возвратов ---
+    waiting_for_adjustment_type = State()       # Выбор типа корректировки (возврат, списание, оприходование)
+    # --- Состояния для расширенного возврата от клиента ---
+    waiting_for_return_client_name = State()    # Ожидание ввода имени клиента для возврата
+    # selecting_return_client_from_list - Это состояние будет удалено/изменено
+    waiting_for_return_invoice_number = State() # НОВОЕ СОСТОЯНИЕ: ожидание номера накладной для возврата
+    # waiting_for_return_invoice_selection - Это состояние будет удалено/изменено
+    waiting_for_return_product = State()        # Выбор продукта для возврата (после выбора клиента и/или накладной)
+    waiting_for_return_quantity = State()       # Ввод количества для возврата
+    waiting_for_return_description = State()    # Ввод описания/причины возврата
+    confirm_return_data = State()               # Подтверждение данных возврата
+
+      # --- СОСТОЯНИЯ ДЛЯ ДОБАВЛЕНИЯ НОВОЙ ПОСТАВКИ (СУПЕР-ПОСТАВКИ) ---
+    waiting_for_new_supplier_invoice_date = State() # Дата накладной от поставщика
+    waiting_for_new_supplier_invoice_supplier = State() # Выбор поставщика
+    waiting_for_new_supplier_invoice_number = State() # Ввод номера накладной
+    waiting_for_new_supplier_invoice_due_date = State() # Срок оплаты накладной
+    adding_new_supplier_invoice_items = State() # Меню добавления позиций в новую накладную поставщика
+    waiting_for_new_supplier_invoice_product_selection = State() # Выбор продукта для новой накладной
+    waiting_for_new_supplier_invoice_quantity = State() # Количество для новой накладной
+    waiting_for_new_supplier_invoice_unit_cost = State() # Себестоимость для новой накладной
+    confirm_new_supplier_invoice_data = State() # Подтверждение и сохранение новой накладной поставщика
+
+    # --- СОСТОЯНИЯ ДЛЯ ВОЗВРАТА ПОСТАВЩИКУ ---
+    waiting_for_supplier_name = State() # Ввод имени поставщика для возврата
+    waiting_for_incoming_delivery_selection = State() # Выбор конкретной поставки от поставщика
+    waiting_for_return_to_supplier_product = State() # Выбор продукта для возврата поставщику
+    waiting_for_return_to_supplier_quantity = State()
+    waiting_for_return_to_supplier_description = State()
+    confirm_return_to_supplier_data = State()
+    # --- КОНЕЦ НОВЫХ СОСТОЯНИЙ ---

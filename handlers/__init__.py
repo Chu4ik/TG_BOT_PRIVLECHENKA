@@ -14,6 +14,7 @@ from .reports.supplier_reports import router as supplier_reports_router
 from .reports.inventory_report import router as inventory_report_router 
 from .reports.add_delivery_handler import router as add_delivery_handler_router
 from .admin_orders.admin_order_editor import router as admin_order_editor_router
+from .inventory_adjustments.adjustment_handler import router as adjustment_router
 
 # Собираем все router-ы в список
 order_routers = [
@@ -28,5 +29,6 @@ order_routers = [
     supplier_reports_router,
     inventory_report_router,    
     add_delivery_handler_router,
-    admin_order_editor_router
+    admin_order_editor_router,
+    adjustment_router
 ]
