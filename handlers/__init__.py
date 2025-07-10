@@ -13,6 +13,7 @@ from .reports.client_payments_report import router as client_payments_report_rou
 from .reports.supplier_reports import router as supplier_reports_router
 from .reports.inventory_report import router as inventory_report_router 
 from .reports.add_delivery_handler import router as add_delivery_handler_router
+from .admin_orders.admin_order_editor import router as admin_order_editor_router
 
 # Собираем все router-ы в список
 order_routers = [
@@ -26,5 +27,6 @@ order_routers = [
     client_payments_report_router,
     supplier_reports_router,
     inventory_report_router,    
-    add_delivery_handler_router
+    add_delivery_handler_router,
+    admin_order_editor_router
 ]

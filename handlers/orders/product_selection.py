@@ -141,6 +141,12 @@ async def process_quantity_input(message: Message, state: FSMContext):
             await state.clear() 
             return
 
+        # --- УДАЛЯЕМ ВСЮ ЛОГИКУ ПРОВЕРКИ И КОРРЕКЦИИ ОСТАТКОВ ЗДЕСЬ ---
+        # product_id = selected_product["product_id"]
+        # available_stock = await get_product_current_stock(db_pool, product_id) # Этот вызов также удалить
+        # ... (весь if/elif/else блок, который был здесь для проверки остатков) ...
+        # --- КОНЕЦ УДАЛЯЕМОЙ ЛОГИКИ ---
+
         item_found_and_updated = False
         for item in cart:
             if item["product_id"] == selected_product["product_id"]:

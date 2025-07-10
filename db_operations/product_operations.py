@@ -224,18 +224,7 @@ async def get_product_current_stock(db_pool: asyncpg.Pool, product_id: int) -> D
 async def record_stock_movement(db_pool: asyncpg.Pool, product_id: int, quantity: Decimal, movement_type: str, source_document_type: Optional[str] = None, source_document_id: Optional[int] = None, unit_cost: Optional[Decimal] = None, description: Optional[str] = None) -> bool:
     """
     Записывает движение товара на складе (incoming/outgoing) и обновляет таблицу stock.
-
-    Args:
-        db_pool: Пул соединений с базой данных.
-        product_id: ID продукта.
-        quantity: Количество товара, участвующего в движении.
-        movement_type: Тип движения ('incoming' или 'outgoing').
-        source_document_type: Тип документа-источника (например, 'order', 'delivery').
-        source_document_id: ID документа-источника (например, order_id, delivery_id).
-        unit_cost: Стоимость за единицу для данного движения (обязательно для 'incoming').
-        description: Описание движения.
-    Returns:
-        True, если движение успешно записано и остаток обновлен, False в противном случае.
+    Гарантирует, что остаток не уходит в минус при исходящих движениях.
     """
     conn = None
     try:
@@ -246,10 +235,19 @@ async def record_stock_movement(db_pool: asyncpg.Pool, product_id: int, quantity
             
             current_stock_quantity = existing_stock['quantity'] if existing_stock else Decimal('0.00')
 
+            new_quantity: Decimal
+
             if movement_type == 'incoming':
                 new_quantity = current_stock_quantity + quantity
             elif movement_type == 'outgoing':
-                new_quantity = current_stock_quantity - quantity
+                # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: ПРЕДОТВРАЩЕНИЕ ОТРИЦАТЕЛЬНОГО ОСТАТКА ---
+                if current_stock_quantity < quantity:
+                    logger.warning(f"Попытка списать {quantity} ед. продукта {product_id}, но в наличии только {current_stock_quantity}. Списание до 0.")
+                    new_quantity = Decimal('0.00') # Списываем все, что есть, до нуля
+                    # Опционально: здесь можно поднять ошибку или вернуть False, если нельзя списать меньше запрошенного
+                else:
+                    new_quantity = current_stock_quantity - quantity
+                # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
             else:
                 logger.error(f"Неизвестный тип движения: {movement_type}")
                 return False
@@ -257,15 +255,17 @@ async def record_stock_movement(db_pool: asyncpg.Pool, product_id: int, quantity
             if existing_stock:
                 await conn.execute("UPDATE stock SET quantity = $1 WHERE product_id = $2", new_quantity, product_id)
             else:
+                # Если товара не было в stock, но пытаемся списать, это тоже ошибка
+                if movement_type == 'outgoing' and quantity > 0:
+                    logger.error(f"Попытка списать продукт {product_id}, которого нет в stock.")
+                    return False
                 await conn.execute("INSERT INTO stock (product_id, quantity) VALUES ($1, $2)", product_id, new_quantity)
 
             # Запись движения в 'inventory_movements'
-            # Для входящих движений unit_cost должен быть предоставлен
             if movement_type == 'incoming' and unit_cost is None:
                 logger.error("Для входящего движения (incoming) unit_cost должен быть предоставлен.")
                 raise ValueError("unit_cost is required for 'incoming' movement type.")
             
-            # Используем quantity_change, source_document_type, source_document_id и description
             await conn.execute("""
                 INSERT INTO inventory_movements (product_id, quantity_change, movement_type, movement_date, unit_cost, source_document_type, source_document_id, description)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8);

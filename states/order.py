@@ -44,3 +44,7 @@ class OrderFSM(StatesGroup):
     entering_new_delivery_unit_cost = State()    # Ввод новой цены для позиции
     confirm_delivery_data = State()              # <--- УБЕДИТЕСЬ, ЧТО ЭТО СОСТОЯНИЕ ПРИСУТСТВУЕТ И НАПИСАНО ПРАВИЛЬНО
 
+        # Состояния для редактирования существующего заказа
+    editing_order_selection_admin = State() # Выбор заказа из списка для админа
+    editing_order_existing = State()       # Пользователь (админ) редактирует существующий заказ
+

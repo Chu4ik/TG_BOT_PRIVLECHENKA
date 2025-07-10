@@ -113,25 +113,29 @@ async def show_cart_menu(message: Message, state: FSMContext, db_pool): # <--- �
 
 # Добавили db_pool как аргумент функции
 @router.callback_query(F.data == "confirm_order")
-async def confirm_order(callback: CallbackQuery, state: FSMContext, db_pool): # <--- ИЗМЕНЕНО
+async def confirm_order(callback: CallbackQuery, state: FSMContext, db_pool):
     user_id = callback.from_user.id
     state_data = await state.get_data()
     cart_items = state_data.get("cart", [])
     delivery_date = state_data.get("delivery_date")
     client_id = state_data.get("client_id")
     address_id = state_data.get("address_id")
-    
     client_name = state_data.get("client_name") 
     address_text = state_data.get("address_text") 
+    
+    # Получаем ID редактируемого заказа и его оригинальный статус
+    editing_order_id = state_data.get("editing_order_id")
+    original_order_status = state_data.get("original_order_status") 
 
+    # --- ПРОВЕРКИ НА ПОЛНОТУ ДАННЫХ (Обязательны для любого заказа) ---
     if not cart_items:
         await callback.answer("Ваша корзина пуста. Добавьте товары перед подтверждением.", show_alert=True)
-        await show_cart_menu(callback.message, state, db_pool) # <--- ПЕРЕДАЛИ db_pool
+        await show_cart_menu(callback.message, state, db_pool)
         return
 
     if not delivery_date:
         await callback.answer("Пожалуйста, выберите дату доставки перед подтверждением заказа.", show_alert=True)
-        await edit_delivery_date(callback, state, db_pool) # <--- ПЕРЕДАЛИ db_pool
+        await edit_delivery_date(callback, state, db_pool)
         return
         
     if not client_id:
@@ -141,42 +145,13 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, db_pool): # 
     if not address_id:
         await callback.answer("Пожалуйста, выберите адрес доставки для заказа.", show_alert=True)
         return
+    # --- КОНЕЦ ПРОВЕРОК ---
 
-    # --- НАЧАЛО БЛОКА ГЕНЕРАЦИИ ТЕКСТА СВОДКИ ---
-    raw_summary_content = await _get_cart_summary_text(cart_items, delivery_date, client_name, address_text)
-    
-    formatted_summary_lines = []
-    lines = raw_summary_content.split('\n')
-    for line in lines:
-        if line.startswith("---"):
-            formatted_summary_lines.append(line)
-        elif line.startswith("Клиент:"):
-            formatted_summary_lines.append(f"*{line}*")
-        elif line.startswith("Адрес:"):
-            formatted_summary_lines.append(f"*{line}*")
-        elif line.startswith("Дата доставки:"):
-            formatted_summary_lines.append(f"*{line}*")
-        elif line.startswith("--- ТОВАРЫ ---"):
-            formatted_summary_lines.append(line)
-        elif line.startswith("ИТОГО:"):
-            formatted_summary_lines.append(f"*{line}*")
-        elif line.startswith("  Корзина пуста."):
-            formatted_summary_lines.append(line)
-        elif re.match(r"^\d+\.", line):
-            formatted_summary_lines.append(line)
-        else:
-            formatted_summary_lines.append(line)
-
-    pre_escaped_text_for_confirm = "\n".join(formatted_summary_lines)
-    escaped_summary_text = escape_markdown_v2(pre_escaped_text_for_confirm)
-    # --- КОНЕЦ БЛОКА ГЕНЕРАЦИИ ТЕКСТА СВОДКИ ---
-
-
-    # --- НАЧАЛО БЛОКА СОХРАНЕНИЯ В БД (ОСТАЕТСЯ ПОСЛЕ ГЕНЕРАЦИИ ТЕКСТА) ---
+    # Вычисляем общую сумму заказа
     total = sum(item["quantity"] * item["price"] for item in cart_items)
     
-    # get_employee_id теперь асинхронная и принимает pool как первый аргумент
-    employee_id = await get_employee_id(db_pool, user_id) # <--- ИЗМЕНЕНО: ПЕРЕДАЛИ db_pool
+    # Получаем ID сотрудника
+    employee_id = await get_employee_id(db_pool, user_id) 
 
     if employee_id is None:
         logger.error(f"Не удалось получить employee_id для пользователя {user_id}. Заказ не сохранен.")
@@ -189,61 +164,80 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, db_pool): # 
         await state.clear() 
         return
 
-    conn = None # Инициализируем conn для finally блока
+    conn = None 
     try:
-        conn = await db_pool.acquire() # Получаем соединение из пула
-        async with conn.transaction(): # Используем асинхронный контекстный менеджер для транзакций
-            # Вставка в таблицу orders
-            order_row = await conn.fetchrow("""
-                INSERT INTO orders (order_date, delivery_date, employee_id, client_id, address_id, total_amount, status)
-                VALUES ($1, $2, $3, $4, $5, $6, 'draft')
-                RETURNING order_id;
-            """, date.today(), delivery_date, employee_id, client_id, address_id, total)
-            order_id = order_row['order_id'] # Доступ к результату по имени столбца
-
-            # Вставка в таблицу order_lines
-            for item in cart_items:
+        conn = await db_pool.acquire()
+        async with conn.transaction(): # Используем асинхронную транзакцию
+            if editing_order_id: # Если редактируем существующий заказ
+                logger.info(f"Обновление существующего заказа #{editing_order_id} пользователем {user_id}.")
+                
+                # Обновляем основные поля заказа
                 await conn.execute("""
-                    INSERT INTO order_lines (order_id, product_id, quantity, unit_price)
-                    VALUES ($1, $2, $3, $4)
-                """, order_id, item["product_id"], item["quantity"], item["price"])
+                    UPDATE orders
+                    SET delivery_date = $1, client_id = $2, address_id = $3, total_amount = $4, status = $5
+                    WHERE order_id = $6;
+                """, delivery_date, client_id, address_id, total, original_order_status, editing_order_id)
+                
+                # Удаляем все старые строки заказа
+                await conn.execute("DELETE FROM order_lines WHERE order_id = $1;", editing_order_id)
 
-        # Если мы дошли до сюда, транзакция успешно завершена (commit происходит автоматически)
-        logger.info(f"Заказ #{order_id} сохранен в БД со статусом 'draft'. Общая сумма: {total:.2f}")
+                # Вставляем все новые/измененные строки заказа
+                for item in cart_items:
+                    await conn.execute("""
+                        INSERT INTO order_lines (order_id, product_id, quantity, unit_price)
+                        VALUES ($1, $2, $3, $4)
+                    """, editing_order_id, item["product_id"], item["quantity"], item["price"])
+                
+                order_id_for_message = editing_order_id # Используем ID существующего заказа для сообщения
+                text_to_send = f"✅ *Заказ №{order_id_for_message}* успешно *обновлен* в базе данных.\nОбщая сумма: *{total:.2f}* грн.\n"
 
-        # --- ДОБАВЛЕННЫЕ СТРОКИ ---
-        # 1. Отвечаем на callback_query, чтобы убрать "зависание" кнопки
-        await callback.answer("✅ Заказ успешно сохранен!", show_alert=False) 
-        
-        # 2. Изменяем сообщение, чтобы подтвердить сохранение
-        text_to_send = f"✅ *Заказ №{order_id}* успешно сформирован и сохранен в базе данных.\nОбщая сумма: *{total:.2f}* грн.\n"
+            else: # Если создаем новый заказ
+                logger.info(f"Создание нового заказа пользователем {user_id}.")
+                
+                # Вставка в таблицу orders с начальным статусом 'draft'
+                order_row = await conn.fetchrow("""
+                    INSERT INTO orders (order_date, delivery_date, employee_id, client_id, address_id, total_amount, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'draft')
+                    RETURNING order_id;
+                """, date.today(), delivery_date, employee_id, client_id, address_id, total)
+                order_id_for_message = order_row['order_id'] # Получаем ID нового заказа
+
+                # Вставка строк заказа
+                for item in cart_items:
+                    await conn.execute("""
+                        INSERT INTO order_lines (order_id, product_id, quantity, unit_price)
+                        VALUES ($1, $2, $3, $4)
+                    """, order_id_for_message, item["product_id"], item["quantity"], item["price"])
+                
+                text_to_send = f"✅ *Заказ №{order_id_for_message}* успешно *сформирован* и сохранен в базе данных.\nОбщая сумма: *{total:.2f}* грн.\n"
+
+        # --- Общий код после успешной транзакции (для обоих случаев: новый или обновленный) ---
+        await callback.answer("✅ Операция с заказом успешно завершена!", show_alert=False) 
         escaped_text_to_send = escape_markdown_v2(text_to_send)
         await callback.message.edit_text(
-            #f"✅ *Заказ №{order_id}* успешно сформирован и сохранен в базе данных\\.\nОбщая сумма: *{total:.2f}* грн\\.\n", # <-- А здесь используете СТАРУЮ, РУЧНУЮ ЭКРАНИРОВАННУЮ строку
-            escaped_text_to_send, # <-- ВОТ ЧТО НУЖНО БЫЛО ИСПОЛЬЗОВАТЬ
+            escaped_text_to_send,
             parse_mode="MarkdownV2",
-            reply_markup=None # Убираем кнопки, так как заказ завершен
+            reply_markup=None 
         )
 
         order_cache.pop(user_id, None) 
         await state.clear()
 
-    except asyncpg.exceptions.PostgresError as e: # Ловим специфические ошибки asyncpg
-        logger.error(f"Ошибка БД при сохранении заказа в БД для пользователя {user_id}: {e}", exc_info=True)
-        # Откат транзакции происходит автоматически, если исключение возникло внутри async with conn.transaction()
+    except asyncpg.exceptions.PostgresError as e: 
+        logger.error(f"Ошибка БД при сохранении/обновлении заказа для пользователя {user_id} (заказ ID {editing_order_id or 'новый'}): {e}", exc_info=True)
         await callback.answer("Произошла ошибка при сохранении заказа. Пожалуйста, попробуйте снова.", show_alert=True)
         await callback.message.edit_text(
-            f"{escape_markdown_v2('❌ Произошла ошибка при сохранении заказа в базу данных. Пожалуйста, попробуйте снова или обратитесь к администратору.')}",
+            f"{escape_markdown_v2('❌ Произошла ошибка при сохранении/обновлении заказа в базу данных. Пожалуйста, попробуйте снова или обратитесь к администратору.')}",
             parse_mode="MarkdownV2",
             reply_markup=None
         )
         await state.clear() 
         return 
     except Exception as e:
-        logger.error(f"Непредвиденная ошибка при сохранении заказа в БД для пользователя {user_id}: {e}", exc_info=True)
+        logger.error(f"Непредвиденная ошибка при сохранении/обновлении заказа для пользователя {user_id} (заказ ID {editing_order_id or 'новый'}): {e}", exc_info=True)
         await callback.answer("Произошла непредвиденная ошибка при сохранении заказа. Пожалуйста, попробуйте снова.", show_alert=True)
         await callback.message.edit_text(
-            f"{escape_markdown_v2('❌ Произошла непредвиденная ошибка при сохранении заказа в базу данных. Пожалуйста, попробуйте снова или обратитесь к администратору.')}",
+            f"{escape_markdown_v2('❌ Произошла непредвиденная ошибка при сохранении/обновлении заказа в базу данных. Пожалуйста, попробуйте снова или обратитесь к администратору.')}",
             parse_mode="MarkdownV2",
             reply_markup=None
         )
@@ -251,7 +245,7 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, db_pool): # 
         return
     finally:
         if conn:
-            await db_pool.release(conn) # Возвращаем соединение в пул
+            await db_pool.release(conn)
 
 
 # Добавили db_pool как аргумент функции
@@ -425,7 +419,7 @@ async def select_item_for_quantity(callback: CallbackQuery, state: FSMContext, d
 
 # Добавили db_pool как аргумент функции
 @router.message(StateFilter(OrderFSM.entering_new_quantity))
-async def process_new_quantity_input(message: Message, state: FSMContext, db_pool): # <--- ИЗМЕНЕНО
+async def process_new_quantity_input(message: Message, state: FSMContext, db_pool):
     user_id = message.from_user.id
     state_data = await state.get_data()
     cart_items = state_data.get('cart', [])
@@ -439,29 +433,42 @@ async def process_new_quantity_input(message: Message, state: FSMContext, db_poo
     if item_index is None or not (0 <= item_index < len(cart_items)):
         logger.error(f"User {user_id}: Invalid item_index ({item_index}) or cart_items length ({len(cart_items)}) in process_new_quantity_input.")
         await message.answer("❌ Произошла ошибка при изменении количества. Пожалуйста, попробуйте снова.")
-        await show_cart_menu(message, state, db_pool) # <--- ПЕРЕДАЛИ db_pool
+        await show_cart_menu(message, state, db_pool)
         return
 
     try:
         new_quantity = int(message.text)
-        if new_quantity <= 0:
-            await message.answer("❌ Количество должно быть положительным числом. Попробуйте ещё раз.")
+        if new_quantity < 0: 
+            await message.answer("❌ Количество не может быть отрицательным. Попробуйте ещё раз.")
             return
-
-        cart_items[item_index]['quantity'] = new_quantity
-        await state.update_data(cart=cart_items)
-
-        await message.answer(
-            f"Количество для *{escape_markdown_v2(cart_items[item_index]['product_name'])}* изменено на *{new_quantity}*\\.",
-            parse_mode="MarkdownV2"
-        )
         
-        await show_cart_menu(message, state, db_pool) # <--- ПЕРЕДАЛИ db_pool
+        # --- УДАЛЯЕМ ВСЮ ЛОГИКУ ПРОВЕРКИ И КОРРЕКЦИИ ОСТАТКОВ ЗДЕСЬ ---
+        # product_id = cart_items[item_index]["product_id"]
+        # available_stock = await get_product_current_stock(db_pool, product_id)
+        # ... (весь if/elif/else блок, который был здесь для проверки остатков) ...
+        # --- КОНЕЦ УДАЛЯЕМОЙ ЛОГИКИ ---
+
+        if new_quantity == 0:
+            # Если введено 0, удаляем товар
+            product_name_to_remove = cart_items[item_index]["product_name"]
+            cart_items.pop(item_index) 
+            await message.answer(f"🗑️ Товар *{escape_markdown_v2(product_name_to_remove)}* удален из заказа.", parse_mode="MarkdownV2")
+        else:
+            cart_items[item_index]['quantity'] = new_quantity # Если все в порядке, устанавливаем новое количество
+            await message.answer(
+                f"Количество для *{escape_markdown_v2(cart_items[item_index]['product_name'])}* изменено на *{new_quantity}*\\.",
+                parse_mode="MarkdownV2"
+            )
+
+        await state.update_data(cart=cart_items)
+        
+        # Обновляем сообщение корзины
+        await show_cart_menu(message, state, db_pool) 
 
     except ValueError:
         await message.answer("❌ Неверный формат количества. Введите целое число.")
     except Exception as e:
-        logger.error(f"Ошибка при обработке нового количества: {e}")
+        logger.error(f"Ошибка при обработке нового количества: {e}", exc_info=True)
         await message.answer("Произошла ошибка при изменении количества. Пожалуйста, попробуйте снова.")
 
 

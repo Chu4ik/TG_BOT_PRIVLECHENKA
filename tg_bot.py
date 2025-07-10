@@ -49,7 +49,8 @@ async def set_main_menu_commands(bot: Bot):
         BotCommand(command="/payments", description="💰 Оплаты клиентов"),
         BotCommand(command="/financial_report_today", description="📊 Отчет об оплатах за сегодня"),
         BotCommand(command="/add_delivery", description="🚚 Добавить поступление товара"),
-        BotCommand(command="/inventory_report", description="📈 Отчет об остатках товара") 
+        BotCommand(command="/inventory_report", description="📈 Отчет об остатках товара"),
+        BotCommand(command="/edit_order_admin", description="✍️ Редактировать заказ")
     ]
     await bot.set_my_commands(commands)
     logging.info("Основные команды меню установлены.")
