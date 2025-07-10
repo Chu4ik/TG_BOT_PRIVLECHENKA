@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Optional, List, Dict
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command, StateFilter
 
