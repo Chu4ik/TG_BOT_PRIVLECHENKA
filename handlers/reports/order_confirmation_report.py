@@ -5,6 +5,7 @@ import re
 from datetime import date
 from decimal import Decimal
 from typing import Optional, List, Dict # Убедитесь, что все импорты на месте
+from utils.markdown_utils import escape_markdown_v2
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message, ReplyKeyboardRemove
@@ -31,11 +32,6 @@ from db_operations.report_order_confirmation import (
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-def escape_markdown_v2(text: str) -> str:
-    """Escapes special characters for MarkdownV2."""
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
 def build_order_list_keyboard(orders: List[UnconfirmedOrder]) -> InlineKeyboardMarkup:
     """

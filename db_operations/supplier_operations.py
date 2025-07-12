@@ -47,6 +47,7 @@ class IncomingDeliveryLine(NamedTuple): # Переименовал для ясн
     unit_cost: Decimal
     total_cost: Decimal # Генерируемое поле в БД
     delivery_date: date # Добавлено для get_supplier_incoming_deliveries
+    invoice_number: Optional[str]
 
 class IncomingDeliveryReportItem(NamedTuple):
     delivery_id: int
@@ -172,67 +173,142 @@ async def get_supplier_outstanding_invoices(pool: asyncpg.Pool, supplier_id: int
         if conn:
             await pool.release(conn)
 
-# --- НОВАЯ ФУНКЦИЯ: record_supplier_payment_or_return ---
-async def record_supplier_payment_or_return(
-    pool: asyncpg.Pool,
-    supplier_id: int,
-    amount: Decimal, # Положительная для оплаты, отрицательная для возврата
-    payment_method: str, # 'bank_transfer', 'cash', 'return_credit'
-    description: Optional[str] = None,
-    incoming_delivery_id: Optional[int] = None, # ID строки входящей поставки
-    supplier_invoice_id: Optional[int] = None # ID шапки накладной поставщика
-) -> bool:
+async def get_all_suppliers(pool: asyncpg.Pool) -> List[Dict]:
     """
-    Записывает платеж поставщику или возврат товара поставщику (кредитную ноту).
-    Обновляет amount_paid и payment_status в supplier_invoices.
+    Получает список всех поставщиков.
     """
     conn = None
     try:
         conn = await pool.acquire()
+        suppliers = await conn.fetch("SELECT supplier_id, name FROM suppliers ORDER BY name LIMIT 10;") # Ограничиваем 10, как запрошено
+        return [dict(s) for s in suppliers]
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка поставщиков: {e}", exc_info=True)
+        return []
+    finally:
+        if conn:
+            await pool.release(conn)
+
+async def get_supplier_outstanding_invoices(pool: asyncpg.Pool, supplier_id: int) -> List[Dict]:
+    """
+    Получает список накладных поставщика, по которым есть задолженность (не полностью оплачены).
+    """
+    conn = None
+    try:
+        conn = await pool.acquire()
+        # Выбираем накладные, которые не полностью оплачены
+        invoices = await conn.fetch("""
+            SELECT
+                supplier_invoice_id,
+                invoice_number,
+                total_amount,
+                amount_paid,
+                payment_status
+            FROM
+                supplier_invoices
+            WHERE
+                supplier_id = $1 AND payment_status != 'paid'
+            ORDER BY
+                invoice_date DESC;
+        """, supplier_id)
+        return [dict(inv) for inv in invoices]
+    except Exception as e:
+        logger.error(f"Ошибка при получении накладных поставщика {supplier_id}: {e}", exc_info=True)
+        return []
+    finally:
+        if conn:
+            await pool.release(conn)
+
+async def get_products_by_invoice_id(pool: asyncpg.Pool, supplier_invoice_id: int) -> List[Dict]:
+    """
+    Получает список продуктов, связанных с конкретной накладной поставщика.
+    """
+    conn = None
+    try:
+        conn = await pool.acquire()
+        products = await conn.fetch("""
+            SELECT
+                id.product_id,
+                p.name AS product_name,
+                id.quantity,
+                id.unit_cost
+            FROM
+                incoming_deliveries id
+            JOIN
+                products p ON id.product_id = p.product_id
+            WHERE
+                id.supplier_invoice_id = $1
+            ORDER BY
+                p.name;
+        """, supplier_invoice_id)
+        return [dict(prod) for prod in products]
+    except Exception as e:
+        logger.error(f"Ошибка при получении продуктов для накладной {supplier_invoice_id}: {e}", exc_info=True)
+        return []
+    finally:
+        if conn:
+            await pool.release(conn)
+
+# --- НОВАЯ ФУНКЦИЯ: record_supplier_payment_or_return ---
+async def record_supplier_payment_or_return(
+    pool: asyncpg.Pool,
+    supplier_id: int,
+    amount: Decimal,
+    payment_method: str,
+    description: Optional[str] = None,
+    incoming_delivery_id: Optional[int] = None, # Этот аргумент функции
+    supplier_invoice_id: Optional[int] = None
+) -> tuple[bool, Optional[str]]:
+    conn = None
+    try:
+        conn = await pool.acquire()
         async with conn.transaction():
-            # 1. Запись в supplier_payments
+            # ИСПРАВЛЕНО: Используем 'delivery_id' в SQL-запросе, если это ваш столбец
             await conn.execute("""
-                INSERT INTO supplier_payments (payment_date, supplier_id, incoming_delivery_id, supplier_invoice_id, amount, payment_method, description)
+                INSERT INTO supplier_payments (payment_date, supplier_id, delivery_id, supplier_invoice_id, amount, payment_method, description)
                 VALUES ($1, $2, $3, $4, $5, $6, $7);
             """, date.today(), supplier_id, incoming_delivery_id, supplier_invoice_id, amount, payment_method, description)
+            #                  ^ Используем $3 для incoming_delivery_id, которое будет передано как delivery_id в таблице.
 
-            # 2. Обновление supplier_invoices (если привязан к шапке)
+            new_payment_status = None
             if supplier_invoice_id:
+                # ... (логика обновления supplier_invoices - без изменений) ...
                 invoice_info = await conn.fetchrow("SELECT total_amount, amount_paid FROM supplier_invoices WHERE supplier_invoice_id = $1 FOR UPDATE", supplier_invoice_id)
                 if invoice_info:
                     current_total_amount = invoice_info['total_amount']
                     current_amount_paid = invoice_info['amount_paid']
 
-                    new_amount_paid = current_amount_paid + amount # Если amount отрицательный (возврат), то уменьшится
+                    new_amount_paid = current_amount_paid + amount
                     
-                    new_payment_status = 'unpaid'
+                    new_payment_status_calc = 'unpaid'
                     if new_amount_paid >= current_total_amount:
-                        new_payment_status = 'paid'
+                        new_payment_status_calc = 'paid'
                     elif new_amount_paid > 0 and new_amount_paid < current_total_amount:
-                        new_payment_status = 'partially_paid'
+                        new_payment_status_calc = 'partially_paid'
                     
                     await conn.execute("""
                         UPDATE supplier_invoices
                         SET amount_paid = $1, payment_status = $2
                         WHERE supplier_invoice_id = $3;
-                    """, new_amount_paid, new_payment_status, supplier_invoice_id)
+                    """, new_amount_paid, new_payment_status_calc, supplier_invoice_id)
+                    
+                    new_payment_status = new_payment_status_calc # Обновляем возвращаемое значение
                 else:
                     logger.warning(f"Накладная поставщика ID {supplier_invoice_id} не найдена для обновления платежного статуса.")
             
             logger.info(f"Операция в supplier_payments записана: поставщик {supplier_id}, сумма {amount}, метод {payment_method}.")
-            return True
+            return True, new_payment_status
     except asyncpg.exceptions.PostgresError as e:
         logger.error(f"Ошибка БД при записи операции в supplier_payments: {e}", exc_info=True)
-        return False
+        return False, None
     except Exception as e:
         logger.error(f"Неизвестная ошибка при записи операции в supplier_payments: {e}", exc_info=True)
-        return False
+        return False, None
     finally:
         if conn:
             await pool.release(conn)
 
-
-async def record_incoming_delivery( # Теперь принимает supplier_invoice_id и записывает одну строку поступления
+async def record_incoming_delivery(
     pool: asyncpg.Pool,
     delivery_date: date,
     supplier_id: int,
@@ -245,11 +321,15 @@ async def record_incoming_delivery( # Теперь принимает supplier_i
     try:
         conn = await pool.acquire()
         async with conn.transaction():
+            # --- ИСПРАВЛЕНО ЗДЕСЬ: Вычисляем total_cost в Python ---
+            calculated_total_cost = quantity * unit_cost
+            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
             delivery_line_id = await conn.fetchval("""
-                INSERT INTO incoming_deliveries (delivery_date, supplier_id, product_id, quantity, unit_cost, supplier_invoice_id) -- ИСПРАВЛЕНО ЗДЕСЬ: УДАЛЕН total_cost
-                VALUES ($1, $2, $3, $4::NUMERIC, $5::NUMERIC, $6)
+                INSERT INTO incoming_deliveries (delivery_date, supplier_id, product_id, quantity, unit_cost, supplier_invoice_id, total_cost) -- ДОБАВЛЕН total_cost в список столбцов
+                VALUES ($1, $2, $3, $4::NUMERIC, $5::NUMERIC, $6, $7::NUMERIC) -- ДОБАВЛЕН $7 для total_cost и явное приведение
                 RETURNING delivery_id;
-            """, delivery_date, supplier_id, product_id, quantity, unit_cost, supplier_invoice_id)
+            """, delivery_date, supplier_id, product_id, quantity, unit_cost, supplier_invoice_id, calculated_total_cost) # ДОБАВЛЕН calculated_total_cost
 
             if not delivery_line_id:
                 raise Exception("Не удалось создать запись о позиции поступления в incoming_deliveries.")
@@ -282,19 +362,35 @@ async def record_incoming_delivery( # Теперь принимает supplier_i
             await pool.release(conn)
 
 # --- НОВАЯ ФУНКЦИЯ: get_supplier_incoming_deliveries ---
-async def get_supplier_incoming_deliveries(pool: asyncpg.Pool, supplier_id: int) -> List[IncomingDeliveryLine]: # Возвращает List[IncomingDeliveryLine]
+async def get_supplier_incoming_deliveries(pool: asyncpg.Pool, supplier_id: int) -> List[IncomingDeliveryLine]:
     """
-    Получает список всех строк поступлений (incoming_deliveries) для конкретного поставщика.
+    Получает список всех строк поступлений (incoming_deliveries) для конкретного поставщика,
+    включая номер накладной из supplier_invoices.
     """
     conn = None
     try:
         conn = await pool.acquire()
-        deliveries = await conn.fetch("""
-            SELECT delivery_id, supplier_invoice_id, supplier_id, product_id, quantity, unit_cost, total_cost, delivery_date
-            FROM incoming_deliveries
-            WHERE supplier_id = $1
-            ORDER BY delivery_id DESC;
-        """, supplier_id)
+        query = """
+            SELECT
+                id.delivery_id,
+                id.supplier_invoice_id,
+                id.supplier_id,
+                id.product_id,
+                id.quantity,
+                id.unit_cost,
+                id.total_cost,
+                id.delivery_date,
+                si.invoice_number AS invoice_number -- <--- НОВОЕ: получаем номер накладной из supplier_invoices
+            FROM
+                incoming_deliveries id
+            LEFT JOIN -- Используем LEFT JOIN, так как supplier_invoice_id может быть NULL
+                supplier_invoices si ON id.supplier_invoice_id = si.supplier_invoice_id
+            WHERE
+                id.supplier_id = $1
+            ORDER BY
+                id.delivery_id DESC;
+        """
+        deliveries = await conn.fetch(query, supplier_id)
         return [IncomingDeliveryLine(**d) for d in deliveries]
     except Exception as e:
         logger.error(f"Ошибка БД при получении строк поступлений для поставщика {supplier_id}: {e}", exc_info=True)

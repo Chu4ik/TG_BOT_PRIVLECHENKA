@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 from states.order import OrderFSM
 import re
+from utils.markdown_utils import escape_markdown_v2
 
 import asyncpg.exceptions 
 
@@ -15,12 +16,6 @@ from handlers.orders.product_selection import send_all_products
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-# Убедитесь, что эта функция определена или импортирована корректно
-def escape_markdown_v2(text: str) -> str:
-    """Escapes special characters for MarkdownV2."""
-    special_chars = r'_*[]()~`>#+-=|{}.!' 
-    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
 @router.message(F.text == "✅ Создать заказ") 
 @router.message(F.text == "/new_order") 

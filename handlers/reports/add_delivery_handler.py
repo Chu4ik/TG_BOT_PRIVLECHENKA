@@ -5,18 +5,19 @@ import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
+from utils.markdown_utils import escape_markdown_v2
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command, StateFilter
 
-from states.order import OrderFSM # Импортируем FSM состояния
-# ОБНОВЛЕННЫЕ ИМПОРТЫ ИЗ db_operations
+from states.order import OrderFSM
+# ИМПОРТЫ ИЗ db_operations
 from db_operations.product_operations import get_all_products_for_selection, ProductItem, get_product_by_id
 from db_operations.supplier_operations import (
     find_suppliers_by_name, Supplier, create_supplier_invoice,
-    record_incoming_delivery as record_incoming_delivery_line, # Импортируем как record_incoming_delivery_line
+    record_incoming_delivery as record_incoming_delivery_line,
     get_supplier_by_id
 )
 
@@ -24,22 +25,8 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 # --- КОНСТАНТЫ И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-MAX_RESULTS_TO_SHOW = 10 # Для отображения поставщиков
-DEFAULT_DUE_DATE_DAYS = 7 # Срок оплаты по умолчанию (7 дней)
-
-def escape_markdown_v2(text: str) -> str:
-    """Escapes all special characters for MarkdownV2."""
-    if text is None:
-        return ""
-    text = text.replace('\\', '\\\\')
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    escaped_text_parts = []
-    for char in text:
-        if char in special_chars:
-            escaped_text_parts.append('\\' + char)
-        else:
-            escaped_text_parts.append(char)
-    return "".join(escaped_text_parts)
+MAX_RESULTS_TO_SHOW = 10 
+DEFAULT_DUE_DATE_DAYS = 7 
 
 # --- Клавиатуры ---
 
@@ -63,12 +50,7 @@ def build_supplier_selection_keyboard(suppliers: List[Supplier]) -> InlineKeyboa
     """Строит клавиатуру для выбора поставщика."""
     buttons = []
     for supplier in suppliers[:MAX_RESULTS_TO_SHOW]:
-        buttons.append([
-            InlineKeyboardButton(
-                text=escape_markdown_v2(supplier.name),
-                callback_data=f"select_supplier_for_new_inv_{supplier.supplier_id}"
-            )
-        ])
+        buttons.append([InlineKeyboardButton(text=escape_markdown_v2(supplier.name), callback_data=f"select_supplier_for_new_inv_{supplier.supplier_id}")])
     buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_new_supplier_invoice")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -86,7 +68,6 @@ def build_products_keyboard(products: List[ProductItem]) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def build_add_supplier_invoice_item_menu_keyboard(has_items: bool) -> InlineKeyboardMarkup:
-    """Строит клавиатуру для меню добавления/редактирования позиций накладной поставщика."""
     buttons = [
         [InlineKeyboardButton(text="➕ Добавить позицию", callback_data="add_new_supplier_invoice_item")],
     ]
@@ -106,11 +87,8 @@ def build_confirm_new_supplier_invoice_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
-# --- Вспомогательные функции для сводки ---
-
 def get_supplier_invoice_summary_text(data: Dict[str, Any]) -> str:
-    """Формирует сводный текст о новой накладной поставщика, правильно экранируя для MarkdownV2."""
+    """Формирует сводный текст по новой накладной поставщика."""
     invoice_date_str = data.get('new_supplier_invoice_date', date.today()).strftime('%Y-%m-%d')
     supplier_name_escaped = escape_markdown_v2(data.get('new_supplier_name', 'Неизвестно'))
     invoice_number_escaped = escape_markdown_v2(data.get('new_supplier_invoice_number', 'Без номера'))
@@ -154,7 +132,7 @@ def get_supplier_invoice_summary_text(data: Dict[str, Any]) -> str:
 async def cmd_add_delivery(message: Message, state: FSMContext):
     """Начинает процесс добавления новой накладной поставщика."""
     await state.clear()
-    await state.update_data(new_supplier_invoice_items=[]) # Инициализируем позиции накладной
+    await state.update_data(new_supplier_invoice_items=[])
     
     current_date = date.today()
     keyboard = build_date_selection_keyboard(current_date)
@@ -217,7 +195,6 @@ async def process_new_supplier_invoice_number(message: Message, state: FSMContex
         return
     await state.update_data(new_supplier_invoice_number=invoice_number)
 
-    # Предлагаем срок оплаты по умолчанию
     invoice_date = (await state.get_data()).get('new_supplier_invoice_date', date.today())
     default_due_date = invoice_date + timedelta(days=DEFAULT_DUE_DATE_DAYS)
 
@@ -243,7 +220,7 @@ async def process_new_supplier_invoice_due_date(message: Message, state: FSMCont
             return
     
     await state.update_data(new_supplier_invoice_due_date=new_due_date)
-    await show_add_supplier_invoice_items_menu(message, state) # Переходим к добавлению позиций
+    await show_add_supplier_invoice_items_menu(message, state)
     await state.set_state(OrderFSM.adding_new_supplier_invoice_items)
 
 async def show_add_supplier_invoice_items_menu(message: Message, state: FSMContext):
@@ -258,6 +235,7 @@ async def show_add_supplier_invoice_items_menu(message: Message, state: FSMConte
         await message.edit_text(summary_text, reply_markup=keyboard, parse_mode="MarkdownV2")
     except Exception as e:
         logger.warning(f"Не удалось отредактировать сообщение при показе меню позиций накладной поставщика: {e}")
+        # Если редактирование не удалось, отправляем новое сообщение.
         await message.answer(summary_text, reply_markup=keyboard, parse_mode="MarkdownV2")
 
 @router.callback_query(F.data == "add_new_supplier_invoice_item", StateFilter(OrderFSM.adding_new_supplier_invoice_items))
@@ -278,7 +256,7 @@ async def add_new_supplier_invoice_item_start(callback: CallbackQuery, state: FS
 async def process_new_supplier_invoice_product_selection(callback: CallbackQuery, state: FSMContext, db_pool):
     """Обрабатывает выбор продукта для новой накладной поставщика."""
     await callback.answer()
-    product_id = int(callback.data.split("_")[6])
+    product_id = int(callback.data.split("_")[6]) # <-- ИЗМЕНЕНО
     product_info = await get_product_by_id(db_pool, product_id)
     
     if product_info:
@@ -290,7 +268,7 @@ async def process_new_supplier_invoice_product_selection(callback: CallbackQuery
         await state.set_state(OrderFSM.waiting_for_new_supplier_invoice_quantity)
     else:
         await callback.message.edit_text(escape_markdown_v2("Неизвестный продукт. Пожалуйста, выберите из списка."), parse_mode="MarkdownV2")
-        await state.set_state(OrderFSM.adding_new_supplier_invoice_items) # Возвращаемся в меню добавления позиций
+        await state.set_state(OrderFSM.adding_new_supplier_invoice_items)
 
 @router.message(StateFilter(OrderFSM.waiting_for_new_supplier_invoice_quantity))
 async def process_new_supplier_invoice_quantity(message: Message, state: FSMContext):
@@ -300,6 +278,7 @@ async def process_new_supplier_invoice_quantity(message: Message, state: FSMCont
         if quantity <= 0:
             await message.answer(escape_markdown_v2("Количество должно быть положительным целым числом."), parse_mode="MarkdownV2")
             return
+
         await state.update_data(current_new_inv_item_quantity=quantity)
         
         product_name = (await state.get_data()).get('current_new_inv_item_product_name', 'продукта')
@@ -312,7 +291,8 @@ async def process_new_supplier_invoice_quantity(message: Message, state: FSMCont
 async def process_new_supplier_invoice_unit_cost(message: Message, state: FSMContext):
     """Обрабатывает введенную стоимость за единицу товара и добавляет позицию."""
     try:
-        unit_cost = Decimal(message.text.strip())
+        # ИСПРАВЛЕНО ЗДЕСЬ: Заменяем запятые на точки перед преобразованием в Decimal
+        unit_cost = Decimal(message.text.strip().replace(',', '.')) 
         if unit_cost <= 0:
             await message.answer(escape_markdown_v2("Стоимость должна быть положительным числом."), parse_mode="MarkdownV2")
             return
@@ -329,13 +309,10 @@ async def process_new_supplier_invoice_unit_cost(message: Message, state: FSMCon
         items.append(new_item)
         await state.update_data(new_supplier_invoice_items=items)
 
-        # Очищаем временные данные для текущей позиции
         await state.update_data(current_new_inv_item_product_id=None, current_new_inv_item_product_name=None, current_new_inv_item_quantity=None)
 
         await message.answer(escape_markdown_v2("Позиция добавлена."), parse_mode="MarkdownV2")
         await show_add_supplier_invoice_items_menu(message, state)
-        await state.set_state(OrderFSM.adding_new_supplier_invoice_items)
-
     except ValueError:
         await message.answer(escape_markdown_v2("Неверный формат стоимости. Пожалуйста, введите число (например, 100.50)."), parse_mode="MarkdownV2")
     except Exception as e:
@@ -369,7 +346,6 @@ async def confirm_and_create_supplier_invoice(callback: CallbackQuery, state: FS
     items = data.get('new_supplier_invoice_items', [])
 
     if not items:
-        # Убедимся, что это сообщение тоже экранировано
         await callback.message.edit_text(escape_markdown_v2("Невозможно создать: нет позиций в накладной."), parse_mode="MarkdownV2")
         await state.clear()
         return
@@ -390,6 +366,7 @@ async def confirm_and_create_supplier_invoice(callback: CallbackQuery, state: FS
         success_count = 0
         failed_count = 0
         for item in items:
+            # Убедитесь, что record_incoming_delivery_line не генерирует ошибок
             inserted_id = await record_incoming_delivery_line(
                 db_pool,
                 delivery_date=invoice_date,
@@ -405,15 +382,13 @@ async def confirm_and_create_supplier_invoice(callback: CallbackQuery, state: FS
                 failed_count += 1
                 logger.error(f"Не удалось записать позицию поступления для продукта ID {item['product_id']}.")
         
-        # --- ИСПРАВЛЕНО ЗДЕСЬ: Экранируем всю строку целиком ---
+        # Убедитесь, что raw строка содержит только чистый текст, который потом экранируется
         final_message_raw = f"✅ Накладная поставщика *{invoice_number}* успешно создана!\nЗаписано позиций: `{success_count}`. Ошибок: `{failed_count}`."
         if failed_count > 0:
             final_message_raw += "\nНекоторые позиции не были записаны из-за ошибок."
         
-        await callback.message.edit_text(escape_markdown_v2(final_message_raw), parse_mode="MarkdownV2") # Экранируем весь текст
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        await callback.message.edit_text(escape_markdown_v2(final_message_raw), parse_mode="MarkdownV2")
     else:
-        # Убедимся, что это сообщение тоже экранировано
         await callback.message.edit_text(escape_markdown_v2("❌ Произошла ошибка при создании накладной поставщика. Возможно, номер накладной уже существует."), parse_mode="MarkdownV2")
     
     await state.clear()
@@ -431,10 +406,3 @@ async def cancel_new_supplier_invoice(callback: CallbackQuery, state: FSMContext
     await state.clear()
     await callback.message.edit_text(escape_markdown_v2("Операция создания накладной поставщика отменена."), parse_mode="MarkdownV2")
     await callback.answer()
-
-
-# --- Хендлеры для корректировок инвентаря (return_in, adjustment_in/out) --- (БЕЗ ИЗМЕНЕНИЙ, кроме изменения FSM States)
-# ... (process_return_quantity, process_adjustment_description, confirm_and_record_adjustment, edit_adjustment_data, cancel_adjustment) ...
-
-# --- Хендлеры для возврата поставщику (return_out) --- (БЕЗ ИЗМЕНЕНИЙ, кроме изменения FSM States)
-# ... (process_supplier_name_input, select_supplier_for_return_from_list, select_another_supplier_return, process_incoming_delivery_input, process_incoming_delivery_selection, show_products_for_return_to_supplier_selection, process_return_to_supplier_product, confirm_adj_product_to_supplier, select_another_adj_product_to_supplier, process_return_to_supplier_quantity, process_return_to_supplier_description, confirm_and_record_return_to_supplier) ...

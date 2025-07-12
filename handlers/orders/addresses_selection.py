@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 from states.order import OrderFSM
 import asyncpg.exceptions # Добавляем импорт для асинхронных ошибок БД
+from utils.markdown_utils import escape_markdown_v2
 
 # Ленивый импорт для product_selection, чтобы избежать циклических зависимостей
 from handlers.orders.product_selection import send_all_products

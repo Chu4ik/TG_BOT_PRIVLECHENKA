@@ -2,6 +2,7 @@
 import re
 from datetime import date
 from decimal import Decimal
+from utils.markdown_utils import escape_markdown_v2
 
 # Функция escape_markdown_v2 УДАЛЕНА ИЗ ЭТОГО ФАЙЛА!
 

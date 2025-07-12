@@ -5,6 +5,7 @@ import re
 from datetime import date
 from decimal import Decimal
 from typing import List, Dict, Optional
+from utils.markdown_utils import escape_markdown_v2
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message

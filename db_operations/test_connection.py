@@ -10,11 +10,12 @@ from config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 # def test_connection():
 #     try:
 #         conn = psycopg2.connect(
-#             dbname=DB_NAME,
-#             user=DB_USER,
-#             password=DB_PASSWORD,
-#             host=DB_HOST,
-#             port=DB_PORT
+#             dbname = DB_NAME,
+#             user = DB_USER,
+#             password = DB_PASSWORD,
+#             host = DB_HOST,
+#             port = DB_PORT,
+#             # ssl = sslmode
 #         )
 #         print("✅ Успешное подключение к базе данных PostgreSQL")
 #         conn.close()
@@ -51,3 +52,17 @@ def get_table_list():
 if __name__ == "__main__":
     # test_connection()
     get_table_list()
+
+
+# import psycopg2
+# import sys
+# sys.path.append("..")  # если config.py на уровень выше
+# from config import DB_CONFIG
+
+# try:
+#     conn = psycopg2.connect(**DB_CONFIG)
+#     print("✅ Успешное подключение к PostgreSQL")
+#     conn.close()
+# except Exception as e:
+#     print(f"❌ Ошибка подключения: {e}")
+

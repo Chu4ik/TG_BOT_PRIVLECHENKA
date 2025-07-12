@@ -3,6 +3,7 @@ import logging
 from decimal import Decimal
 from datetime import date, timedelta
 import re 
+from utils.markdown_utils import escape_markdown_v2
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -20,14 +21,6 @@ import asyncpg.exceptions # Добавляем импорт для асинхр�
 
 from keyboards.inline_keyboards import build_cart_keyboard, delivery_date_keyboard, build_edit_item_menu_keyboard
 from states.order import OrderFSM
-
-def escape_markdown_v2(text: str) -> str:
-    """
-    Helper function to escape telegram markup symbols in MarkdownV2.
-    Escapes characters: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !
-    """
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return "".join(["\\" + char if char in escape_chars else char for char in text])
 
 router = Router()
 logger = logging.getLogger(__name__)

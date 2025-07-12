@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter, Command
 from states.order import OrderFSM
 from utils.order_cache import order_cache 
+from utils.markdown_utils import escape_markdown_v2
 
 import asyncpg.exceptions
 
@@ -16,31 +17,6 @@ from handlers.orders.order_helpers import _get_cart_summary_text
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-def escape_markdown_v2(text: str) -> str:
-    """
-    Экранирует все специальные символы для MarkdownV2.
-    Эта функция гарантирует, что каждый специальный символ будет правильно экранирован
-    путем построения новой строки, обрабатывая каждый символ по очереди.
-    """
-    if text is None:
-        logger.error("escape_markdown_v2 received NoneType text. Returning empty string.")
-        return ""
-
-    # Важно: сначала экранируем обратный слэш, чтобы избежать двойного экранирования
-    # уже добавленных обратных слэшей.
-    text = text.replace('\\', '\\\\')
-
-    # Остальные специальные символы MarkdownV2
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-
-    escaped_text_parts = []
-    for char in text:
-        if char in special_chars:
-            escaped_text_parts.append('\\' + char)
-        else:
-            escaped_text_parts.append(char)
-    return "".join(escaped_text_parts)
 
 
 # Хендлер для команды /new_order, который инициирует процесс создания заказа

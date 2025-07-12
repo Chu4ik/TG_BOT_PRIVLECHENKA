@@ -97,6 +97,22 @@ async def get_all_product_stock(db_pool: asyncpg.Pool) -> List[ProductStockItem]
             logger.error(f"Ошибка БД при получении остатков товаров: {e}", exc_info=True)
             return []
 
+async def get_all_products(pool: asyncpg.Pool) -> List[Dict]:
+    """
+    Получает список всех продуктов.
+    """
+    conn = None
+    try:
+        conn = await pool.acquire()
+        products = await conn.fetch("SELECT product_id, name, cost_per_unit FROM products ORDER BY name;")
+        return [dict(p) for p in products]
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка всех продуктов: {e}", exc_info=True)
+        return []
+    finally:
+        if conn:
+            await pool.release(conn)
+
 async def add_product(db_pool: asyncpg.Pool, name: str, description: Optional[str], cost_per_unit: Decimal) -> Optional[int]:
     """
     Добавляет новый продукт в базу данных.
@@ -320,3 +336,4 @@ async def get_products_sold_to_client(pool: asyncpg.Pool, client_id: int) -> Lis
     finally:
         if conn:
             await pool.release(conn)
+

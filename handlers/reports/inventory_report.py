@@ -7,19 +7,13 @@ from typing import List
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.filters import Command
+from utils.markdown_utils import escape_markdown_v2
 
 # Импортируем функции из нового файла операций с продуктами
 from db_operations.product_operations import get_all_product_stock, ProductStockItem
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-# Убедитесь, что эта функция определена или доступна глобально в вашем проекте
-def escape_markdown_v2(text: str) -> str:
-    """Escapes special characters for MarkdownV2."""
-    # ИСПРАВЛЕНО: Добавлен обратный слэш '\' в список специальных символов
-    special_chars = r'_*[]()~`>#+-=|{}.!\'\\'
-    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
 @router.message(Command("inventory_report"))
 async def show_inventory_report(message: Message, db_pool):

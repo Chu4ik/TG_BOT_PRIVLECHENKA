@@ -7,16 +7,12 @@ from typing import List, Dict, Optional
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
+from utils.markdown_utils import escape_markdown_v2
 
 from db_operations.report_my_orders import get_my_orders_for_today, get_order_full_details, OrderDetail
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-def escape_markdown_v2(text: str) -> str:
-    """Escapes special characters for MarkdownV2."""
-    special_chars = r'_*[]()~`>#+-=|{}.!' 
-    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
 def build_my_orders_keyboard(orders: list) -> InlineKeyboardMarkup:
     """

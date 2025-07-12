@@ -5,6 +5,7 @@ import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List
+from utils.markdown_utils import escape_markdown_v2
 
 from aiogram import Router, F
 from aiogram.types import Message
@@ -20,12 +21,6 @@ from db_operations.supplier_operations import (
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-# Убедитесь, что эта функция определена или доступна глобально в вашем проекте
-def escape_markdown_v2(text: str) -> str:
-    """Escapes special characters for MarkdownV2."""
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
 @router.message(Command("incoming_deliveries_today"))
 async def show_incoming_deliveries_report(message: Message, db_pool):

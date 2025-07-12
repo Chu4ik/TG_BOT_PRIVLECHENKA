@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import date, datetime # Добавляем datetime для сегодняшней даты
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional, List, Dict
 
@@ -11,96 +11,52 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command, StateFilter
 
-# Импортируем все необходимое из db_operations/report_payment_operations
-from db_operations.report_payment_operations import ( # <-- Убедитесь, что импорт из report_payment_operations
+# ИМПОРТИРУЕМ ИЗМЕНЕННУЮ ФУНКЦИЮ ЭКРАНИРОВАНИЯ
+from utils.markdown_utils import escape_markdown_v2 # <-- ИСПРАВЛЕНО: используем встроенный aiogram.utils.markdown
+
+
+from db_operations.report_payment_operations import (
     get_unpaid_invoices,
     confirm_payment_in_db,
     update_partial_payment_in_db,
     reverse_payment_in_db,
-    get_today_paid_invoices, # <--- НОВАЯ ФУНКЦИЯ
+    get_today_paid_invoices,
+    get_single_unpaid_invoice_details,
     UnpaidInvoice,
-    TodayPaidInvoice # <--- НОВЫЙ NAMEDTUPLE
+    TodayPaidInvoice
 )
-from states.order import OrderFSM # Убедитесь, что у вас есть этот FSM
+from states.order import OrderFSM 
+
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-# Убедитесь, что эта функция определена или доступна глобально в вашем проекте
-def escape_markdown_v2(text: str) -> str:
-    """Escapes special characters for MarkdownV2."""
-    # ИСПРАВЛЕНО: Добавлен обратный слэш '\' в список специальных символов
-    special_chars = r'_*[]()~`>#+-=|{}.!\'\\'
-    return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", text)
 
 # --- Вспомогательные функции для клавиатуры и форматирования ---
 
 def build_unpaid_invoices_keyboard(invoices: List[UnpaidInvoice]) -> InlineKeyboardMarkup:
     """
     Строит инлайн-клавиатуру для списка неоплаченных накладных.
+    Отображает только номер заказа и имя клиента.
     """
     buttons = []
     for invoice in invoices:
-        # Форматируем текст кнопки: ID_ДД ММ ГГГГ Клиент Сумма
-        # Пример: 16_06 07 2025 Клиент 123.45₴
-        if invoice.confirmation_date:
-            day_part = invoice.confirmation_date.strftime('%d')
-            month_year_part = invoice.confirmation_date.strftime('%m %Y')
-            date_str_formatted = f"{day_part} {month_year_part}"
-        else:
-            date_str_formatted = "Н/Д"
-
-        button_text = f"{invoice.order_id}_{date_str_formatted} {invoice.client_name} {invoice.outstanding_balance:.2f}₴"
+        # ИСПРАВЛЕНО ЗДЕСЬ: Максимально упрощенный текст кнопки для отладки
+        # Убираем все форматирование, кроме ID и имени клиента
+        button_text = (
+            f"Заказ №{str(invoice.order_id)} {invoice.client_name}"
+        )
         buttons.append([
             InlineKeyboardButton(
-                text=escape_markdown_v2(button_text),
+                text=escape_markdown_v2(button_text), # Экранируем ВЕСЬ текст кнопки
                 callback_data=f"view_invoice_details_{invoice.order_id}"
             )
         ])
     
-    # Кнопки общего действия (если есть)
     buttons.append([
         InlineKeyboardButton(text="🔄 Обновить список", callback_data="refresh_unpaid_invoices"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main_menu") # Или другая кнопка назад
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main_menu")
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def format_unpaid_invoice_details(invoice: UnpaidInvoice) -> str:
-    """
-    Форматирует детальное сообщение для одной неоплаченной накладной.
-    """
-    confirmation_date_str = (
-        invoice.confirmation_date.strftime('%Y-%m-%d')
-        if invoice.confirmation_date
-        else "Не указана"
-    )
-    due_date_str = (
-        invoice.due_date.strftime('%Y-%m-%d')
-        if invoice.due_date
-        else "Не указана"
-    )
-
-    status_map = {
-        'unpaid': 'Не оплачено',
-        'partially_paid': 'Частично оплачено',
-        'paid': 'Оплачено',
-        'overdue': 'Просрочено'
-    }
-    payment_status_display_name = status_map.get(invoice.payment_status, invoice.payment_status)
-
-    text = (
-        f"📋 *Детали накладной №{escape_markdown_v2(invoice.invoice_number)}:*\n"
-        f"🆔 ID Заказа: `{invoice.order_id}`\n"
-        f"📅 Дата накладной: `{confirmation_date_str}`\n"
-        f"📅 Срок оплаты: `{due_date_str}`\n"
-        f"👤 Клиент: {escape_markdown_v2(invoice.client_name)}\n"
-        f"💰 Общая сумма: `{invoice.total_amount:.2f} ₴`\n"
-        f"💵 Оплачено: `{invoice.amount_paid:.2f} ₴`\n"
-        f"⚠️ Остаток к оплате: `{invoice.outstanding_balance:.2f} ₴`\n"
-        f"📊 Статус оплаты: `{escape_markdown_v2(payment_status_display_name)}`"
-    )
-    return text
 
 
 def build_invoice_details_keyboard(order_id: int) -> InlineKeyboardMarkup:
@@ -115,13 +71,71 @@ def build_invoice_details_keyboard(order_id: int) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# Определение функции format_unpaid_invoice_details
+def format_unpaid_invoice_details(invoice: UnpaidInvoice) -> str:
+    """
+    Форматирует детальное сообщение для одной неоплаченной накладной,
+    включая детали платежей и возвратов.
+    Каждое переменное значение экранируется.
+    """
+    # Экранируем каждый элемент данных из NamedTuple, чтобы избежать ошибок
+    invoice_number_escaped = escape_markdown_v2(invoice.invoice_number)
+    order_id_escaped = escape_markdown_v2(str(invoice.order_id)) 
+    client_name_escaped = escape_markdown_v2(invoice.client_name)
+    payment_status_display_name = {
+        'unpaid': 'Не оплачено',
+        'partially_paid': 'Частично оплачено',
+        'paid': 'Оплачено',
+        'overdue': 'Просрочено'
+    }.get(invoice.payment_status, invoice.payment_status)
+    payment_status_display_name_escaped = escape_markdown_v2(payment_status_display_name)
+
+    confirmation_date_str = (
+        invoice.confirmation_date.strftime('%Y-%m-%d')
+        if invoice.confirmation_date
+        else "Не указана"
+    )
+    due_date_str = (
+        invoice.due_date.strftime('%Y-%m-%d')
+        if invoice.due_date
+        else "Не указана"
+    )
+
+    # ИСПРАВЛЕНО ЗДЕСЬ: Экранируем КАЖДУЮ СТРОКУ, которая может содержать спецсимволы
+    # Даже если она содержит уже форматирование MarkdownV2, escape_markdown_v2 должна справиться
+    # с экранированием остальных спецсимволов.
+    
+    text_parts = []
+    # Заголовок
+    text_parts.append(escape_markdown_v2(f"📋 *Детали накладной №{invoice_number_escaped}:*\n")) # Экранируем всю строку
+    # ID Заказа
+    text_parts.append(f"🆔 ID Заказа: `{order_id_escaped}`\n") 
+    # Даты
+    text_parts.append(f"📅 Дата накладной: `{escape_markdown_v2(confirmation_date_str)}`\n") 
+    text_parts.append(f"📅 Срок оплаты: `{escape_markdown_v2(due_date_str)}`\n") 
+    # Клиент
+    text_parts.append(f"👤 Клиент: {client_name_escaped}\n")
+    # Суммы
+    text_parts.append(f"💰 Общая сумма заказа: `{escape_markdown_v2(f'{invoice.total_amount:.2f}')} ₴`\n")
+    text_parts.append(f"💵 Всего оплачено (поступления): `{escape_markdown_v2(f'{invoice.total_payments_received:.2f}')} ₴`\n")
+    
+    if invoice.total_credits_issued > 0:
+        text_parts.append(f"↩️ Сумма возвратов: `{escape_markdown_v2(f'{invoice.total_credits_issued:.2f}')} ₴`\n")
+    
+    # Остаток и статус
+    text_parts.append(
+        f"⚠️ *Актуальный остаток к оплате: `{escape_markdown_v2(f'{invoice.actual_outstanding_balance:.2f}')} ₴`*\n"
+        f"📊 Статус оплаты (из накладной): `{payment_status_display_name_escaped}`"
+    )
+    return "".join(text_parts)
+
 
 # --- ХЕНДЛЕРЫ ДЛЯ ОТЧЕТА "ОПЛАТЫ КЛИЕНТОВ" ---
 
-@router.message(Command("payments")) # Можно использовать /payments или кнопку
-@router.message(F.text == "💰 Отчет по оплатам") # Если будет кнопка в главном меню
-@router.callback_query(F.data == "back_to_unpaid_list") # <--- Добавляем сюда обработку "Назад к списку"
-@router.callback_query(F.data == "refresh_unpaid_invoices") # <--- Добавляем сюда обработку "Обновить список"
+@router.message(Command("payments")) 
+@router.message(F.text == "💰 Отчет по оплатам") 
+@router.callback_query(F.data == "back_to_unpaid_list")
+@router.callback_query(F.data == "refresh_unpaid_invoices")
 async def show_client_payments_report(callback_or_message, state: FSMContext, db_pool):
     """
     Показывает список неоплаченных накладных.
@@ -151,6 +165,7 @@ async def show_client_payments_report(callback_or_message, state: FSMContext, db
 
     if not invoices:
         report_text = escape_markdown_v2("Нет неоплаченных накладных.")
+        
         if is_callback:
             try:
                 await message_object.edit_text(report_text, parse_mode="MarkdownV2")
@@ -175,7 +190,7 @@ async def show_client_payments_report(callback_or_message, state: FSMContext, db
     await state.set_state(OrderFSM.viewing_unpaid_invoices_list)
 
 
-@router.message(Command("financial_report_today")) # <--- НОВЫЙ ХЕНДЛЕР
+@router.message(Command("financial_report_today"))
 async def show_financial_report_today(message: Message, db_pool):
     """
     Показывает финансовый отчет за сегодня: все оплаченные накладные и общая сумма.
@@ -197,13 +212,13 @@ async def show_financial_report_today(message: Message, db_pool):
             report_parts.append(
                 f"*{i+1}\\. Накладная №{escape_markdown_v2(invoice.invoice_number)}*\n"
                 f"   Клиент: {escape_markdown_v2(invoice.client_name)}\n"
-                f"   Сумма оплаты: `{invoice.amount_paid:.2f} ₴`\n"
-                f"   Дата оплаты: `{invoice.actual_payment_date.strftime('%Y-%m-%d')}`\n" # confirmation_date
+                f"   Сумма оплаты: `{escape_markdown_v2(f'{invoice.amount_paid:.2f}')} ₴`\n"
+                f"   Дата оплаты: `{escape_markdown_v2(invoice.actual_payment_date.strftime('%Y-%m-%d'))}`\n"
                 f"{escape_markdown_v2('----------------------------------')}\n"
             )
             total_paid_amount += invoice.amount_paid
         
-        report_parts.append(f"*ИТОГО ОПЛАЧЕНО ЗА СЕГОДНЯ: `{total_paid_amount:.2f} ₴`*")
+        report_parts.append(f"*ИТОГО ОПЛАЧЕНО ЗА СЕГОДНЯ: `{escape_markdown_v2(f'{total_paid_amount:.2f}')} ₴`*")
 
     final_report_text = "".join(report_parts)
     
@@ -214,52 +229,25 @@ async def show_financial_report_today(message: Message, db_pool):
 async def view_invoice_details(callback: CallbackQuery, state: FSMContext, db_pool):
     order_id = int(callback.data.split("view_invoice_details_")[1])
     
-    conn = None
-    invoice = None
-    try:
-        conn = await db_pool.acquire()
-        record = await conn.fetchrow("""
-            SELECT
-                o.order_id,
-                o.invoice_number,
-                o.confirmation_date,
-                c.name AS client_name,
-                o.total_amount,
-                o.amount_paid,
-                (o.total_amount - o.amount_paid) AS outstanding_balance,
-                o.payment_status,
-                o.due_date
-            FROM
-                orders o
-            JOIN
-                clients c ON o.client_id = c.client_id
-            JOIN
-                addresses a ON o.address_id = a.address_id
-            WHERE
-                o.order_id = $1;
-        """, order_id)
-        if record:
-            invoice = UnpaidInvoice(**record)
-    except Exception as e:
-        logger.error(f"Ошибка при получении деталей накладной #{order_id}: {e}", exc_info=True)
-        await callback.answer("Ошибка при загрузке деталей накладной.", show_alert=True)
-        if conn: await db_pool.release(conn)
-        return
-    finally:
-        if conn:
-            await db_pool.release(conn)
+    invoice = await get_single_unpaid_invoice_details(db_pool, order_id)
 
     if invoice:
-        await state.update_data(current_invoice_id=order_id) # Сохраняем ID для дальнейших действий
-        details_text = format_unpaid_invoice_details(invoice)
+        await state.update_data(current_invoice_id=order_id)
+        details_text_raw = format_unpaid_invoice_details(invoice) # Получаем необработанный текст
+        
+        # --- НОВОЕ: Оборачиваем весь текст в обратные апострофы, чтобы избежать ошибок парсинга MarkdownV2 ---
+        # Это крайняя мера, чтобы гарантировать, что все символы будут отображаться буквально.
+        details_text_safe = f"```\n{details_text_raw}\n```" 
+        # --- КОНЕЦ НОВОГО ---
+
         keyboard = build_invoice_details_keyboard(order_id)
         
-        await callback.message.edit_text(details_text, reply_markup=keyboard, parse_mode="MarkdownV2")
+        # Отправляем сообщение с parse_mode="MarkdownV2", но текст уже в "inline code"
+        await callback.message.edit_text(details_text_safe, reply_markup=keyboard, parse_mode="MarkdownV2")
     else:
         await callback.answer("Накладная не найдена.", show_alert=True)
     
-    await callback.answer() # Закрываем индикатор загрузки
-
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("confirm_payment_"), StateFilter(OrderFSM.viewing_unpaid_invoices_list))
 async def handle_confirm_payment(callback: CallbackQuery, state: FSMContext, db_pool):
@@ -286,11 +274,12 @@ async def handle_partial_payment_input(callback: CallbackQuery, state: FSMContex
 async def process_partial_payment_amount(message: Message, state: FSMContext, db_pool):
     amount_text = message.text.strip()
     try:
-        partial_amount = Decimal(amount_text)
+        # ИСПРАВЛЕНО ЗДЕСЬ: Заменяем запятые на точки
+        partial_amount = Decimal(amount_text.replace(',', '.'))
         if partial_amount < 0:
             await message.answer(escape_markdown_v2("Сумма не может быть отрицательной. Введите корректное значение:"), parse_mode="MarkdownV2")
             return
-    except Exception:
+    except Exception: # Ловим более общее исключение, так как Decimal может вызвать InvalidOperation
         await message.answer(escape_markdown_v2("Неверный формат суммы. Пожалуйста, введите число (например, 100.50):"), parse_mode="MarkdownV2")
         return
 
@@ -323,7 +312,6 @@ async def handle_reverse_payment(callback: CallbackQuery, state: FSMContext, db_
         await callback.answer("❌ Ошибка отмены оплаты.", show_alert=True)
     await callback.answer()
 
-# Хендлер для кнопки "Назад к главному меню" (если будет такая кнопка)
 @router.callback_query(F.data == "back_to_main_menu")
 async def back_to_main_menu_from_payments(callback: CallbackQuery, state: FSMContext):
     await state.clear()
